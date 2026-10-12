@@ -1,0 +1,452 @@
+// Fused uint16×uint16 MeshGEMM: two-slice hop, four products, 32-bit acc.
+// A0/A1 and B0/B1 are unsigned 16-bit halves of IEEE float32 words.
+// Zero-extend u16 -> u32 before scalar *; accumulate wrapping 32-bit.
+// No @fmach / @fmachs / @fmacs.
+//
+// SRAM (40 KiB matrix budget, square T):
+//   2 u16 A double-buf: 8 T^2
+//   2 u16 B double-buf: 8 T^2
+//   4 i32 C:           16 T^2
+//   total 32 T^2. T=32 -> 32768. T=40 -> 51200 does not fit.
+param memcpy_params;
+param comm_params;
+param sync_params;
+
+param P: i16;
+param Mt: i16;
+param Kt: i16;
+param Nt: i16;
+// 1 = fabric start barrier before the timed kernel (on-wafer maps only).
+// 0 = no barrier. E2E (H2D + kernel + D2H) must stay at 0.
+param start_barrier: i16 = 0;
+
+var A0_0_tile: [Mt*Kt]u16 = @zeros([Mt*Kt]u16);
+var A0_1_tile: [Mt*Kt]u16 = @zeros([Mt*Kt]u16);
+var ptr_A0: [*]u16 = &A0_0_tile;
+var A0_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A0_0_tile[i] });
+
+var A1_0_tile: [Mt*Kt]u16 = @zeros([Mt*Kt]u16);
+var A1_1_tile: [Mt*Kt]u16 = @zeros([Mt*Kt]u16);
+var ptr_A1: [*]u16 = &A1_0_tile;
+var A1_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> A1_0_tile[i] });
+
+var B0_0_tile: [Kt*Nt]u16 = @zeros([Kt*Nt]u16);
+var B0_1_tile: [Kt*Nt]u16 = @zeros([Kt*Nt]u16);
+var ptr_B0: [*]u16 = &B0_0_tile;
+var B0_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Nt} -> B0_0_tile[i] });
+
+var B1_0_tile: [Kt*Nt]u16 = @zeros([Kt*Nt]u16);
+var B1_1_tile: [Kt*Nt]u16 = @zeros([Kt*Nt]u16);
+var ptr_B1: [*]u16 = &B1_0_tile;
+var B1_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Nt} -> B1_0_tile[i] });
+
+var C00_tile: [Mt*Nt]i32 = @zeros([Mt*Nt]i32);
+var ptr_C00: [*]i32 = &C00_tile;
+var C00_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> C00_tile[i] });
+
+var C01_tile: [Mt*Nt]i32 = @zeros([Mt*Nt]i32);
+var ptr_C01: [*]i32 = &C01_tile;
+var C01_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> C01_tile[i] });
+
+var C10_tile: [Mt*Nt]i32 = @zeros([Mt*Nt]i32);
+var ptr_C10: [*]i32 = &C10_tile;
+var C10_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> C10_tile[i] });
+
+var C11_tile: [Mt*Nt]i32 = @zeros([Mt*Nt]i32);
+var ptr_C11: [*]i32 = &C11_tile;
+var C11_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> C11_tile[i] });
+
+const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
+const layout_module = @import_module("<layout>");
+
+const comm_mod = @import_module("comm_lib/comm_pe.csl", .{
+    .comm_params = comm_params,
+    .P = P, .Mt = Mt, .Kt = Kt, .Nt = Nt,
+    .x_finish_id = x_finish_id,
+    .y_finish_id = y_finish_id,
+    .left_matrix_shift_callback = left_matrix_shift_callback,
+});
+
+const sync_mod = @import_module("sync/pe.csl", .{
+    .sync_params = sync_params,
+    .f_callback = after_start_barrier,
+    .input_queues = [3]u16{6, 7, 3},
+    .output_queues = [3]u16{6, 7, 3},
+});
+
+const jumpcast_finish_id: local_task_id = @get_local_task_id(23);
+const x_finish_id: local_task_id = @get_local_task_id(24);
+const y_finish_id: local_task_id = @get_local_task_id(25);
+const next_step_id: local_task_id = @get_local_task_id(26);
+
+var px: i16 = 0;
+var py: i16 = 0;
+
+var x_shift_step: i16 = 0;
+var x_shift_reverse: bool = false;
+var align_a1: bool = false;
+var slice_phase: i16 = 0;
+
+var swap_ptr: [*]u16 = &A0_0_tile;
+var ptr_A0_send: [*]u16 = &A0_0_tile;
+var ptr_A0_recv: [*]u16 = &A0_1_tile;
+var ptr_A1_send: [*]u16 = &A1_0_tile;
+var ptr_A1_recv: [*]u16 = &A1_1_tile;
+var ptr_B0_send: [*]u16 = &B0_0_tile;
+var ptr_B0_recv: [*]u16 = &B0_1_tile;
+var ptr_B1_send: [*]u16 = &B1_0_tile;
+var ptr_B1_recv: [*]u16 = &B1_1_tile;
+
+var out00_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C00_tile[i] });
+var out01_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C01_tile[i] });
+var out10_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C10_tile[i] });
+var out11_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> C11_tile[i] });
+
+const timestamp = @import_module("<time>");
+var tscStartBuffer = @zeros([timestamp.tsc_size_words]u16);
+var tscEndBuffer = @zeros([timestamp.tsc_size_words]u16);
+
+var time_buf_f32 = @zeros([3]f32);
+var ptr_time_memcpy: [*]f32 = &time_buf_f32;
+
+var tscRefBuffer = @zeros([timestamp.tsc_size_words]u16);
+var time_ref_f32 = @zeros([2]f32);
+var ptr_time_ref: [*]f32 = &time_ref_f32;
+
+fn as_f16(p: [*]u16) [*]f16 {
+    return @ptrcast([*]f16, p);
+}
+
+fn u16_mac(a_elem: u16, c_elem: i32, bval: u32) i32 {
+    return @bitcast(i32, @bitcast(u32, c_elem) + @as(u32, a_elem) * bval);
+}
+
+fn gemv_a0b0(curW: u16) void {
+    var x_col = A0_dsd;
+    var c_col = out00_dsd;
+    @map(u16_mac, x_col, c_col, @as(u32, curW), c_col);
+    out00_dsd = @increment_dsd_offset(out00_dsd, Mt, i32);
+}
+
+fn gemv_a0b1(curW: u16) void {
+    var x_col = A0_dsd;
+    var c_col = out01_dsd;
+    @map(u16_mac, x_col, c_col, @as(u32, curW), c_col);
+    out01_dsd = @increment_dsd_offset(out01_dsd, Mt, i32);
+}
+
+fn gemv_a1b0(curW: u16) void {
+    var x_col = A1_dsd;
+    var c_col = out10_dsd;
+    @map(u16_mac, x_col, c_col, @as(u32, curW), c_col);
+    out10_dsd = @increment_dsd_offset(out10_dsd, Mt, i32);
+}
+
+fn gemv_a1b1(curW: u16) void {
+    var x_col = A1_dsd;
+    var c_col = out11_dsd;
+    @map(u16_mac, x_col, c_col, @as(u32, curW), c_col);
+    out11_dsd = @increment_dsd_offset(out11_dsd, Mt, i32);
+}
+
+fn init_task() void {
+    timestamp.enable_tsc();
+    px = @as(i16, layout_module.get_x_coord());
+    py = @as(i16, layout_module.get_y_coord());
+
+    if (py%2 == 0) {
+        x_shift_step = py/2;
+        x_shift_reverse = true;
+    } else {
+        x_shift_step = (py+1)/2;
+        x_shift_reverse = false;
+    }
+
+    sys_mod.unblock_cmd_stream();
+}
+
+task x_finish() void {
+    @block(x_finish_id);
+    @unblock(jumpcast_finish_id);
+}
+
+task y_finish() void {
+    @block(y_finish_id);
+    @activate(jumpcast_finish_id);
+}
+
+task jumpcast_finish() void {
+    @block(jumpcast_finish_id);
+    @unblock(next_step_id);
+}
+
+task next_step() void {
+    @block(next_step_id);
+    if (slice_phase == 0) {
+        slice_phase = 1;
+        comm_mod.two_hop_comm(
+            as_f16(ptr_A1_send), as_f16(ptr_B1_send),
+            as_f16(ptr_A1_recv), as_f16(ptr_B1_recv),
+        );
+        @activate(next_step_id);
+    } else {
+        slice_phase = 0;
+        mm_compute();
+    }
+}
+
+fn mm_compute() void {
+
+    swap_ptr = ptr_A0_send;
+    ptr_A0_send = ptr_A0_recv;
+    ptr_A0_recv = swap_ptr;
+
+    swap_ptr = ptr_A1_send;
+    ptr_A1_send = ptr_A1_recv;
+    ptr_A1_recv = swap_ptr;
+
+    swap_ptr = ptr_B0_send;
+    ptr_B0_send = ptr_B0_recv;
+    ptr_B0_recv = swap_ptr;
+
+    swap_ptr = ptr_B1_send;
+    ptr_B1_send = ptr_B1_recv;
+    ptr_B1_recv = swap_ptr;
+
+    if (step < P) {
+
+        comm_mod.two_hop_comm(
+            as_f16(ptr_A0_send), as_f16(ptr_B0_send),
+            as_f16(ptr_A0_recv), as_f16(ptr_B0_recv),
+        );
+
+        A0_dsd = @set_dsd_base_addr(A0_dsd, ptr_A0_send);
+        B0_dsd = @set_dsd_base_addr(B0_dsd, ptr_B0_send);
+        A1_dsd = @set_dsd_base_addr(A1_dsd, ptr_A1_send);
+        B1_dsd = @set_dsd_base_addr(B1_dsd, ptr_B1_send);
+
+        A0_dsd = @set_dsd_length(A0_dsd, @bitcast(u16, Mt));
+        B0_dsd = @set_dsd_length(B0_dsd, @bitcast(u16, Nt));
+        A1_dsd = @set_dsd_length(A1_dsd, @bitcast(u16, Mt));
+        B1_dsd = @set_dsd_length(B1_dsd, @bitcast(u16, Nt));
+
+        for (@range(i16, Kt)) |k| {
+
+            out00_dsd = @set_dsd_base_addr(out00_dsd, ptr_C00);
+            @map(gemv_a0b0, B0_dsd);
+
+            out01_dsd = @set_dsd_base_addr(out01_dsd, ptr_C01);
+            @map(gemv_a0b1, B1_dsd);
+
+            out10_dsd = @set_dsd_base_addr(out10_dsd, ptr_C10);
+            @map(gemv_a1b0, B0_dsd);
+
+            out11_dsd = @set_dsd_base_addr(out11_dsd, ptr_C11);
+            @map(gemv_a1b1, B1_dsd);
+
+            A0_dsd = @increment_dsd_offset(A0_dsd, Mt, u16);
+            A1_dsd = @increment_dsd_offset(A1_dsd, Mt, u16);
+            B0_dsd = @increment_dsd_offset(B0_dsd, Nt, u16);
+            B1_dsd = @increment_dsd_offset(B1_dsd, Nt, u16);
+
+        }
+
+        step += 1;
+        @activate(next_step_id);
+
+    } else {
+        step = 0;
+        meshgemm_entry();
+    }
+}
+
+var total_repeat_times: i16 = 1;
+var total_warmup_times: i16 = 0;
+
+var repeat_times: i16 = 0;
+var step: i16 = 0;
+var start_barrier_done: i16 = 0;
+
+fn after_start_barrier() void {
+    start_barrier_done = 1;
+    meshgemm_entry();
+}
+
+fn meshgemm_host(total_warmup_times_: i16, total_repeat_times_: i16) void {
+    total_repeat_times = total_repeat_times_;
+    total_warmup_times = total_warmup_times_;
+
+    repeat_times = 0;
+    step = 0;
+    align_a1 = false;
+    slice_phase = 0;
+    start_barrier_done = 0;
+
+    meshgemm_entry();
+}
+
+fn start_timed_iteration() void {
+    timestamp.get_timestamp(&tscRefBuffer);
+    timestamp.get_timestamp(&tscStartBuffer);
+    repeat_times += 1;
+    ptr_A0_send = &A0_1_tile;
+    ptr_A0_recv = &A0_0_tile;
+    ptr_A1_send = &A1_1_tile;
+    ptr_A1_recv = &A1_0_tile;
+    left_matrix_shift_callback();
+}
+
+fn meshgemm_entry() void {
+
+    if (repeat_times == total_repeat_times + total_warmup_times) {
+        exit();
+    } else {
+        if (repeat_times == total_warmup_times) {
+            if (start_barrier != 0) {
+                if (start_barrier_done == 0) {
+                    sync_mod.f_sync();
+                } else {
+                    start_timed_iteration();
+                }
+            } else {
+                start_timed_iteration();
+            }
+        } else {
+            repeat_times += 1;
+            ptr_A0_send = &A0_1_tile;
+            ptr_A0_recv = &A0_0_tile;
+            ptr_A1_send = &A1_1_tile;
+            ptr_A1_recv = &A1_0_tile;
+            left_matrix_shift_callback();
+        }
+    }
+}
+
+fn left_matrix_shift_callback() void {
+    if (align_a1) {
+        align_a1 = false;
+        if (x_shift_reverse) {
+            comm_mod.left_matrix_shift_reverse(as_f16(ptr_A1_send), as_f16(ptr_A1_recv));
+        } else {
+            comm_mod.left_matrix_shift(as_f16(ptr_A1_send), as_f16(ptr_A1_recv));
+        }
+    } else if (step < @as(i16, P/2)) {
+        if (x_shift_step >= 0) {
+            x_shift_step -= 1;
+
+            swap_ptr = ptr_A0_send;
+            ptr_A0_send = ptr_A0_recv;
+            ptr_A0_recv = swap_ptr;
+
+            swap_ptr = ptr_A1_send;
+            ptr_A1_send = ptr_A1_recv;
+            ptr_A1_recv = swap_ptr;
+        }
+
+        step += 1;
+        align_a1 = true;
+
+        if (x_shift_reverse) {
+            comm_mod.left_matrix_shift_reverse(as_f16(ptr_A0_send), as_f16(ptr_A0_recv));
+        } else {
+            comm_mod.left_matrix_shift(as_f16(ptr_A0_send), as_f16(ptr_A0_recv));
+        }
+    } else {
+        if (x_shift_step != 0) {
+            swap_ptr = ptr_A0_send;
+            ptr_A0_send = ptr_A0_recv;
+            ptr_A0_recv = swap_ptr;
+
+            swap_ptr = ptr_A1_send;
+            ptr_A1_send = ptr_A1_recv;
+            ptr_A1_recv = swap_ptr;
+        }
+
+        step = 0;
+        slice_phase = 0;
+        align_a1 = false;
+
+        @mov32(C00_dsd, @as(i32, 0));
+        @mov32(C01_dsd, @as(i32, 0));
+        @mov32(C10_dsd, @as(i32, 0));
+        @mov32(C11_dsd, @as(i32, 0));
+
+        ptr_B0_send = &B0_1_tile;
+        ptr_B0_recv = &B0_0_tile;
+        ptr_B1_send = &B1_1_tile;
+        ptr_B1_recv = &B1_0_tile;
+
+        mm_compute();
+    }
+}
+
+fn exit() void {
+    timestamp.get_timestamp(&tscEndBuffer);
+    timestamp.disable_tsc();
+
+    f_reference_timestamps();
+    f_memcpy_timestamps();
+    sys_mod.unblock_cmd_stream();
+}
+
+fn f_memcpy_timestamps() void {
+    var lo_ : u16 = 0;
+    var hi_ : u16 = 0;
+
+    lo_ = tscStartBuffer[0];
+    hi_ = tscStartBuffer[1];
+    time_buf_f32[0] = @bitcast(f32, (@as(u32,hi_) << @as(u16,16)) | @as(u32, lo_) );
+
+    lo_ = tscStartBuffer[2];
+    hi_ = tscEndBuffer[0];
+    time_buf_f32[1] = @bitcast(f32, (@as(u32,hi_) << @as(u16,16)) | @as(u32, lo_) );
+
+    lo_ = tscEndBuffer[1];
+    hi_ = tscEndBuffer[2];
+    time_buf_f32[2] = @bitcast(f32, (@as(u32,hi_) << @as(u16,16)) | @as(u32, lo_) );
+}
+
+fn f_reference_timestamps() void {
+    var lo_ : u16 = 0;
+    var hi_ : u16 = 0;
+
+    lo_ = tscRefBuffer[0];
+    hi_ = tscRefBuffer[1];
+    time_ref_f32[0] = @bitcast(f32, (@as(u32,hi_) << @as(u16,16)) | @as(u32, lo_) );
+
+    lo_ = tscRefBuffer[2];
+    hi_ = 0;
+    time_ref_f32[1] = @bitcast(f32, (@as(u32,hi_) << @as(u16,16)) | @as(u32, lo_) );
+}
+
+comptime {
+    @export_symbol(ptr_time_memcpy, "time_memcpy");
+    @export_symbol(ptr_time_ref, "time_ref");
+}
+
+comptime {
+    @bind_local_task(x_finish, x_finish_id);
+    @bind_local_task(y_finish, y_finish_id);
+    @bind_local_task(jumpcast_finish, jumpcast_finish_id);
+    @bind_local_task(next_step, next_step_id);
+
+    @block(x_finish_id);
+    @block(y_finish_id);
+    @block(jumpcast_finish_id);
+    @block(next_step_id);
+}
+
+comptime {
+    @export_symbol(ptr_A0, "A0");
+    @export_symbol(ptr_A1, "A1");
+    @export_symbol(ptr_B0, "B0");
+    @export_symbol(ptr_B1, "B1");
+    @export_symbol(ptr_C00, "C00");
+    @export_symbol(ptr_C01, "C01");
+    @export_symbol(ptr_C10, "C10");
+    @export_symbol(ptr_C11, "C11");
+
+    @export_symbol(init_task);
+    @export_symbol(meshgemm_entry);
+    @export_symbol(meshgemm_host);
+}

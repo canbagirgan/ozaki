@@ -1,0 +1,17 @@
+MeshGEMM device sources and host tiling helpers in this directory are
+adapted from WaferLLM:
+
+  https://github.com/MeshInfra/WaferLLM
+  Copyright 2025 WaferLLM Team
+  Licensed under the Apache License, Version 2.0
+
+CSL files under src/layout.csl, src/meshgemm.csl, and src/comm_lib/ are
+unmodified copies of MeshGEMM/src from that repository (SDK 2.10 / WSE-3).
+src/layout_fp32.csl, src/meshgemm_fp32.csl, and src/comm_lib/comm_pe_fp32.csl
+are an Ozaki-side FP32 port of those kernels (@fmacs / @mov32).
+src/layout_fmachs.csl and src/meshgemm_fmachs.csl keep FP16 A/B tiles and
+the FP16 fabric, and accumulate C with @fmachs into FP32. Host launchers
+wrap all three with the ozaki-roofline timing and float64 accuracy
+contract. The SUMMA kernels under benchmarks/gemm_summa are unchanged.
+src/layout_fused.csl and src/meshgemm_fused.csl run one MeshGEMM
+schedule with four @fmachs products per two-hop step.

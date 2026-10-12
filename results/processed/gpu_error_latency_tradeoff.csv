@@ -1,0 +1,55 @@
+# Digitized from error_latency_tradeoff.png
+# (no GPU CSV/JSON or plotting script was present in this repo).
+# x = median latency [ms], y = Frobenius relative error vs FP64.
+# Log-log panels in the source figure: N = 1024, 2048, 4096, 8192, 16384.
+# Marker RGB sampled from the figure legend. Axis mapping from major log grid lines.
+# Zero-error FP64 references sit on the plotted floor (1e-17), drawn as triangles.
+# ozIMMU (green) has a legend entry in the source figure but no visible marker
+# on these panels. ozIMMU EF appears only at N=1024.
+n,impl,latency_ms,rel_frob
+1024,cuBLAS TF32,0.0395,2.48e-04
+1024,cuBLAS FP16/FP32,0.0560,2.48e-04
+1024,APE FP32T,0.121,2.48e-04
+1024,cuBLAS FP32,0.138,2.54e-07
+1024,GEMMul8,0.436,1.04e-15
+1024,ozIMMU H,0.883,1.04e-15
+1024,ozIMMU EF,1.10,1.04e-15
+1024,ozIMMU RN,1.26,1.03e-15
+1024,ozIMMU BLOCK,1.36,1.08e-15
+1024,Zero vs. FP64 reference,0.243,1e-17
+2048,cuBLAS FP16/FP32,0.157,2.48e-04
+2048,cuBLAS TF32,0.185,2.48e-04
+2048,APE FP32T,0.630,2.48e-04
+2048,cuBLAS FP32,0.986,7.82e-07
+2048,GEMMul8,1.49,1.47e-15
+2048,ozIMMU H,4.16,1.47e-15
+2048,ozIMMU BLOCK,6.01,1.47e-15
+2048,ozIMMU RN,6.38,1.47e-15
+2048,Zero vs. FP64 reference,1.76,1e-17
+4096,cuBLAS FP16/FP32,0.960,2.48e-04
+4096,cuBLAS TF32,1.12,2.48e-04
+4096,APE FP32T,4.14,2.48e-04
+4096,cuBLAS FP32,7.93,1.11e-06
+4096,GEMMul8,8.89,2.07e-15
+4096,ozIMMU H,24.4,2.08e-15
+4096,ozIMMU BLOCK,31.3,2.07e-15
+4096,ozIMMU RN,33.3,2.07e-15
+4096,Zero vs. FP64 reference,8.89,1e-17
+8192,cuBLAS FP16/FP32,5.47,2.48e-04
+8192,cuBLAS TF32,10.7,2.48e-04
+8192,APE FP32T,30.3,2.48e-04
+8192,cuBLAS FP32,60.9,1.56e-06
+8192,GEMMul8,59.8,2.93e-15
+8192,ozIMMU H,170,2.94e-15
+8192,ozIMMU BLOCK,196,2.93e-15
+8192,ozIMMU RN,216,2.93e-15
+8192,Zero vs. FP64 reference,71.9,1e-17
+16384,cuBLAS FP16/FP32,43.0,2.48e-04
+16384,cuBLAS TF32,93.3,2.48e-04
+16384,APE FP32T,255,2.48e-04
+16384,cuBLAS FP32,512,1.11e-06
+16384,GEMMul8,463,4.15e-15
+16384,ozIMMU H,1340,4.16e-15
+16384,ozIMMU BLOCK,1450,4.15e-15
+16384,ozIMMU RN,1560,4.15e-15
+16384,Zero vs. FP64 reference,591,1e-17

@@ -1,0 +1,23 @@
+.venv/
+.venv-repaired/
+.venv-corrupt/
+.wheelhouse/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Cerebras compiler output. Regenerate with scripts/measure.py.
+artifacts/
+compile_out/
+latest/
+hash.json
+*.elf
+*.tar.gz
+*.log
+simfab_traces/
+
+# Appliance dumps. They contain cluster addresses.
+wsjob-*-cluster-details.json
+run_meta.json

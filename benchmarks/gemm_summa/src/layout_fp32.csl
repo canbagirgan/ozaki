@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from Cerebras SDK 2.10 gemm-collectives_2d. The PE rectangle and
+// memcpy channel count are fixed by the compile launcher for this experiment.
+
+param Mt: u16;
+param Kt: u16;
+param Nt: u16;
+param P: u16;
+
+const memcpy = @import_module("<memcpy/get_params>", .{
+  .width = P,
+  .height = P
+});
+
+const c2d = @import_module("<collectives_2d/params>");
+
+layout {
+  @set_rectangle(P, P);
+
+  var px: u16 = 0;
+  while (px < P) : (px += 1) {
+    var py: u16 = 0;
+    const memcpy_params = memcpy.get_params(px);
+    while (py < P) : (py += 1) {
+      const c2d_params = c2d.get_params(px, py, .{
+        .x_colors = .{ @get_color(0), @get_color(1) },
+        .x_entrypoints = .{ @get_local_task_id(8), @get_local_task_id(9) },
+        .y_colors = .{ @get_color(4), @get_color(5) },
+        .y_entrypoints = .{ @get_local_task_id(10), @get_local_task_id(11) },
+      });
+      @set_tile_code(px, py, "pe_fp32.csl", .{
+        .memcpy_params = memcpy_params,
+        .c2d_params = c2d_params,
+        .Mt = Mt,
+        .Kt = Kt,
+        .Nt = Nt,
+      });
+    }
+  }
+
+  @export_name("A", [*]f32, true);
+  @export_name("B", [*]f32, true);
+  @export_name("C", [*]f32, true);
+  @export_name("timer", [*]f32, true);
+  @export_name("reset", fn()void);
+  @export_name("main", fn()void);
+}

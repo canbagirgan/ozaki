@@ -1,0 +1,15 @@
+{
+  "grid": {
+    "width": 640,
+    "height": 640
+  },
+  "channels": 16,
+  "clock_mhz": 1400.0,
+  "gemm": {
+    "warmup": 1,
+    "repetitions": 3,
+    "shapes": [
+      {"n": 2560, "k": 2560, "m": 2560, "label": "square-t4"}
+    ]
+  }
+}

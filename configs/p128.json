@@ -1,0 +1,21 @@
+{
+  "grid": {
+    "width": 128,
+    "height": 128
+  },
+  "channels": 16,
+  "clock_mhz": 1400.0,
+  "bandwidth": {
+    "fp16_elements_per_pe": [1, 4, 16, 64, 256, 1024, 4096],
+    "fp32_elements_per_pe": [1, 4, 16, 64, 256, 1024, 4096],
+    "warmup": 1,
+    "repetitions": 5
+  },
+  "gemm": {
+    "warmup": 2,
+    "repetitions": 9,
+    "shapes": [
+      {"n": 2560, "k": 2560, "m": 2560, "label": "square-t20"}
+    ]
+  }
+}

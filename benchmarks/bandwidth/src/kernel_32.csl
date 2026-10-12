@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: Apache-2.0
+// Derived from the Cerebras SDK 2.10 bandwidth-test timestamp kernel.
+
+param memcpyParams;
+param syncParams;
+
+const timestamp = @import_module("<time>");
+const sys_mod = @import_module("<memcpy/memcpy>", memcpyParams);
+const sync_mod = @import_module("sync/pe.csl", .{
+  .sync_params = syncParams,
+  .f_callback = sys_mod.unblock_cmd_stream,
+  .input_queues = [3]u16{2, 3, 4},
+  .output_queues = [3]u16{2, 3, 4},
+});
+
+const capacity: i16 = 4096;
+var A = @zeros([capacity]u32);
+var time_buf = @zeros([3]f32);
+var time_ref = @zeros([2]f32);
+var tsc_start = @zeros([timestamp.tsc_size_words]u16);
+var tsc_end = @zeros([timestamp.tsc_size_words]u16);
+
+var ptr_A: [*]u32 = &A;
+var ptr_time_memcpy: [*]f32 = &time_buf;
+var ptr_time_ref: [*]f32 = &time_ref;
+
+fn f_tic() void {
+  timestamp.get_timestamp(&tsc_start);
+  sys_mod.unblock_cmd_stream();
+}
+
+fn f_toc() void {
+  timestamp.get_timestamp(&tsc_end);
+  sys_mod.unblock_cmd_stream();
+}
+
+fn f_memcpy_timestamps() void {
+  time_buf[0] = @bitcast(
+    f32,
+    (@as(u32, tsc_start[1]) << @as(u16, 16)) | @as(u32, tsc_start[0])
+  );
+  time_buf[1] = @bitcast(
+    f32,
+    (@as(u32, tsc_end[0]) << @as(u16, 16)) | @as(u32, tsc_start[2])
+  );
+  time_buf[2] = @bitcast(
+    f32,
+    (@as(u32, tsc_end[2]) << @as(u16, 16)) | @as(u32, tsc_end[1])
+  );
+  sys_mod.unblock_cmd_stream();
+}
+
+fn f_sync() void {
+  sync_mod.f_sync();
+}
+
+fn f_reference_timestamps() void {
+  time_ref[0] = @bitcast(
+    f32,
+    (@as(u32, sync_mod.tscRefBuffer[1]) << @as(u16, 16))
+      | @as(u32, sync_mod.tscRefBuffer[0])
+  );
+  time_ref[1] = @bitcast(f32, @as(u32, sync_mod.tscRefBuffer[2]));
+  sys_mod.unblock_cmd_stream();
+}
+
+comptime {
+  @export_symbol(ptr_A, "A");
+  @export_symbol(ptr_time_memcpy, "time_memcpy");
+  @export_symbol(ptr_time_ref, "time_ref");
+  @export_symbol(f_tic);
+  @export_symbol(f_toc);
+  @export_symbol(f_memcpy_timestamps);
+  @export_symbol(f_sync);
+  @export_symbol(f_reference_timestamps);
+}

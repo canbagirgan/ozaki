@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Fixed 64x64, 16-channel WSE-3 transfer benchmark layout.
+
+const width: i16 = 64;
+const height: i16 = 64;
+
+const C0: color = @get_color(0);
+const C1: color = @get_color(1);
+const C2: color = @get_color(2);
+const C3: color = @get_color(3);
+const C4: color = @get_color(4);
+
+const STARTUP: local_task_id = @get_local_task_id(15);
+const SYNC_Y: local_task_id = @get_local_task_id(16);
+const SYNC_BCAST: local_task_id = @get_local_task_id(17);
+const EXIT: local_task_id = @get_local_task_id(18);
+
+const memcpy = @import_module("<memcpy/get_params>", .{
+  .width = width,
+  .height = height,
+});
+
+const sync = @import_module("sync/layout.csl", .{
+  .colors = [5]color{C0, C1, C2, C3, C4},
+  .entrypoints = [4]local_task_id{STARTUP, SYNC_Y, SYNC_BCAST, EXIT},
+  .width = width,
+  .height = height,
+});
+
+layout {
+  @set_rectangle(width, height);
+
+  var py: i16 = 0;
+  while (py < height) : (py += 1) {
+    var px: i16 = 0;
+    while (px < width) : (px += 1) {
+      @set_tile_code(px, py, "kernel_32.csl", .{
+        .memcpyParams = memcpy.get_params(px),
+        .syncParams = sync.get_params(px, py),
+      });
+    }
+  }
+
+  @export_name("A", [*]u32, true);
+  @export_name("time_memcpy", [*]f32, true);
+  @export_name("time_ref", [*]f32, true);
+  @export_name("f_tic", fn()void);
+  @export_name("f_toc", fn()void);
+  @export_name("f_memcpy_timestamps", fn()void);
+  @export_name("f_sync", fn()void);
+  @export_name("f_reference_timestamps", fn()void);
+}
