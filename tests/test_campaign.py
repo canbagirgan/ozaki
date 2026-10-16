@@ -80,6 +80,25 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(compile_cmd[compile_cmd.index("--twosum-period") + 1], "10")
         self.assertEqual(compile_cmd[compile_cmd.index("--n-products") + 1], "3")
 
+    def test_scaled_residual(self) -> None:
+        compile_cmd, launch_cmd = _cmds(method_name="scaled-residual")
+        for cmd in (compile_cmd, launch_cmd):
+            self.assertIn("--scaled-residual", cmd)
+            self.assertEqual(cmd[cmd.index("--n-products") + 1], "3")
+
+    def test_scaled_residual_twosum_every10(self) -> None:
+        for cmd in _cmds(method_name="scaled-residual-twosum-every10"):
+            self.assertIn("--scaled-residual", cmd)
+            self.assertIn("--twosum", cmd)
+            self.assertEqual(cmd[cmd.index("--twosum-period") + 1], "10")
+
+    def test_final_scaling_implementations(self) -> None:
+        for method, fscale in (("scaled-residual-final-vector", False), ("scaled-residual-final-fscale", True)):
+            for cmd in _cmds(method_name=method):
+                self.assertIn("--scaled-residual", cmd)
+                self.assertIn("--twosum", cmd)
+                self.assertEqual("--scaled-residual-fscale" in cmd, fscale)
+
     def test_fp32_mesh(self) -> None:
         compile_cmd, _launch = _cmds(method_name="fp32")
         self.assertTrue(compile_cmd[1].endswith("benchmarks/gemm_mesh/compile.py"))

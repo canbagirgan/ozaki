@@ -39,6 +39,12 @@ RECORD_PREFIX = "OZAKI_RECORD "
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--scaled-residual-fscale", action="store_true", help="Use scalar fscale_f32 only at the final compensated cross merge.")
+    parser.add_argument(
+        "--scaled-residual",
+        action="store_true",
+        help="3 products: store fp16(2**16 * fp32 residual), merge cross sum at 2**-16.",
+    )
     parser.add_argument(
         "--precision",
         choices=("fp16", "fp32"),
@@ -174,6 +180,8 @@ def config_name(
     twosum_a0b0_only: bool = False,
     twosum_cross_only: bool = False,
     fp64_merge: bool = False,
+    scaled_residual: bool = False,
+    scaled_residual_fscale: bool = False,
 ) -> str:
     if precision == "fp32":
         name = f"ozaki-fp32-fused-p{grid_size}-n{shape.n}-k{shape.k}-m{shape.m}"
@@ -208,6 +216,10 @@ def config_name(
         name = name.replace("twosum-", f"twosum-every{twosum_period}-", 1)
     if cross_f16:
         name = name.replace("skip-a1b1", "skip-a1b1-cross-f16", 1)
+    if scaled_residual:
+        name += "-scaled-residual" + ("-final-merge" if twosum else "")
+        if scaled_residual_fscale:
+            name += "-fscale"
     if start_barrier:
         name += "-start-barrier"
     return name
@@ -259,12 +271,14 @@ def load_manifest(
     twosum_a0b0_only: bool = False,
     twosum_cross_only: bool = False,
     fp64_merge: bool = False,
+    scaled_residual: bool = False,
+    scaled_residual_fscale: bool = False,
 ) -> dict:
     path = (
         ROOT
         / "artifacts"
         / "gemm"
-        / f"{config_name(shape, grid_size, n_products, start_barrier, twosum, precision, cross_f16, twosum_period, twosum_a0b0_only, twosum_cross_only, fp64_merge)}.json"
+        / f"{config_name(shape, grid_size, n_products, start_barrier, twosum, precision, cross_f16, twosum_period, twosum_a0b0_only, twosum_cross_only, fp64_merge, scaled_residual, scaled_residual_fscale)}.json"
     )
     if not path.exists():
         raise FileNotFoundError(f"compile manifest not found: {path}")
@@ -273,6 +287,15 @@ def load_manifest(
 
 def main() -> None:
     args = parse_args()
+    if args.scaled_residual_fscale and not (args.scaled_residual and args.twosum):
+        raise ValueError("--scaled-residual-fscale requires --scaled-residual --twosum")
+    if args.scaled_residual and (
+        args.precision != "fp16" or args.n_products != 3
+        or args.cross_f16
+        or (args.twosum and (args.twosum_period != 10
+            or args.twosum_a0b0_only or args.twosum_cross_only or args.fp64_merge))
+    ):
+        raise ValueError("--scaled-residual requires fp16, n_products=3, no cross-f16; TwoSum supports period 10 only")
     if args.simulator and args.start_barrier:
         raise ValueError(
             "--simulator is a barrier-free E2E simfabric run; omit --start-barrier"
@@ -339,6 +362,8 @@ def main() -> None:
         args.cross_f16,
         args.twosum_period,
     )
+    if args.scaled_residual:
+        fused_bytes += (12 if args.twosum else 4) * mt * nt
     budget = args.data_budget_kib * 1024
     if fused_bytes > budget:
         raise ValueError(
@@ -357,6 +382,8 @@ def main() -> None:
         args.twosum_a0b0_only,
         args.twosum_cross_only,
         args.fp64_merge,
+        args.scaled_residual,
+        args.scaled_residual_fscale,
     )
     if int(manifest.get("n_products", 4)) != int(args.n_products):
         raise RuntimeError(
@@ -394,6 +421,10 @@ def main() -> None:
             f"{manifest.get('twosum')} does not match launch --twosum="
             f"{args.twosum}"
         )
+    if bool(manifest.get("scaled_residual_fscale", False)) != args.scaled_residual_fscale:
+        raise ValueError("compile artifact scaling implementation does not match launch")
+    if bool(manifest.get("scaled_residual", False)) != args.scaled_residual:
+        raise ValueError("compile artifact scaled_residual does not match launch")
     if bool(manifest.get("cross_f16")) != bool(args.cross_f16):
         raise RuntimeError(
             "compile artifact cross_f16="
@@ -460,6 +491,10 @@ def main() -> None:
         command = shlex.join(shlex.split(command) + ["--fp64-merge"])
     if args.high_precision or args.n_products == 10:
         command = shlex.join(shlex.split(command) + ["--high-precision"])
+    if args.scaled_residual_fscale:
+        command = shlex.join(shlex.split(command) + ["--scaled-residual-fscale"])
+    if args.scaled_residual:
+        command = shlex.join(shlex.split(command) + ["--scaled-residual"])
     if args.cross_f16:
         command = shlex.join(shlex.split(command) + ["--cross-f16"])
     if args.dump_pe_map:

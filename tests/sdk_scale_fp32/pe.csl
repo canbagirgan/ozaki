@@ -1,0 +1,17 @@
+param memcpy_params;
+const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
+var values: [256]f32 = @zeros([256]f32);
+var scratch: [256]f32 = @zeros([256]f32);
+var ptr_values: [*]f32 = &values;
+const scaler = @import_module("../../benchmarks/gemm_mesh/src/fp32_product_scale.csl", .{
+    .size = 256, .products = &values, .scratch = &scratch,
+});
+fn scale() void {
+    scaler.init();
+    scaler.scale_down16();
+    sys_mod.unblock_cmd_stream();
+}
+comptime {
+    @export_symbol(ptr_values, "values");
+    @export_symbol(scale);
+}

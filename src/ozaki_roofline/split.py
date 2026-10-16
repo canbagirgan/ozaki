@@ -247,6 +247,20 @@ class FiveSlice(NamedTuple):
     w4: np.ndarray
 
 
+def scaled_residual_split_fp16(matrix: np.ndarray) -> TwoSlice:
+    """Return FP16 high and 2**16-scaled low; low must be unscaled at merge.
+
+    Subtraction and scaling both happen in FP32, before casting the low slice.
+    """
+    source = np.asarray(matrix, dtype=np.float32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        high = source.astype(np.float16)
+        low = np.ldexp(source - high.astype(np.float32), 16).astype(np.float16)
+    if not (np.isfinite(high).all() and np.isfinite(low).all()):
+        raise ValueError("source or scaled residual is outside finite FP16 range")
+    return TwoSlice(high, low)
+
+
 def residual_split_fp32(matrix: np.ndarray) -> TwoSlice:
     """Split a 2-D array stored as float64 into two float32 slices.
 

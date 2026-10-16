@@ -26,6 +26,8 @@ class Method:
     twosum_a0b0_only: bool = False
     twosum_cross_only: bool = False
     fp64_merge: bool = False
+    scaled_residual: bool = False
+    scaled_residual_fscale: bool = False
     cross_f16: bool = False
 
 
@@ -37,6 +39,10 @@ METHODS: dict[str, Method] = {
         "ozaki",
         "2-slice triangle: A0B0+A0B1+A1B0, skip A1B1.",
         n_products=3,
+    ),
+    "scaled-residual": Method(
+        "ozaki", "2-slice triangle, residuals scaled by 2**16 before FP16, FP32 cross sum.",
+        n_products=3, scaled_residual=True,
     ),
     "twosum": Method(
         "ozaki",
@@ -50,6 +56,18 @@ METHODS: dict[str, Method] = {
         n_products=3,
         twosum=True,
         twosum_period=5,
+    ),
+    "scaled-residual-final-vector": Method(
+        "ozaki", "Final-only vector scaling, independent TwoSum-every10 streams.",
+        n_products=3, scaled_residual=True, twosum=True, twosum_period=10,
+    ),
+    "scaled-residual-final-fscale": Method(
+        "ozaki", "Final-only fscale_f32 scaling, independent TwoSum-every10 streams.",
+        n_products=3, scaled_residual=True, scaled_residual_fscale=True, twosum=True, twosum_period=10,
+    ),
+    "scaled-residual-twosum-every10": Method(
+        "ozaki", "Scaled cross sum, independent TwoSum-every10 accumulators, one final rescaling.",
+        n_products=3, scaled_residual=True, twosum=True, twosum_period=10,
     ),
     "twosum-every10": Method(
         "ozaki",
@@ -408,6 +426,10 @@ def _ozaki_flags(method: Method) -> list[str]:
         flags.append("--twosum-cross-only")
     if method.fp64_merge:
         flags.append("--fp64-merge")
+    if method.scaled_residual_fscale:
+        flags.append("--scaled-residual-fscale")
+    if method.scaled_residual:
+        flags.append("--scaled-residual")
     if method.cross_f16:
         flags.append("--cross-f16")
     return flags

@@ -1,0 +1,26 @@
+// Called only on the completed cross-sum tile at the final merge.
+// FP16 products and their FP32 TwoSum errors are multiples of 2^-48;
+// after scaling by 2^-16, nonzero words remain normal (>= 2^-64).
+// Guarded halfword-vector x*2^-16, with the same finite-input FTZ contract.
+param size: i16;
+param products: [*]f32;
+param scratch: [*]f32;
+var high_dsd = @get_dsd(mem1d_dsd, .{ .base_address = products, .extent = size, .stride = 2 });
+var low_dsd = @get_dsd(mem1d_dsd, .{ .base_address = products, .extent = size, .stride = 2 });
+var mask_dsd = @get_dsd(mem1d_dsd, .{ .base_address = scratch, .extent = size, .stride = 1 });
+fn init() void {
+    var words = @ptrcast([*]u16, products);
+    var masks = @ptrcast([*]u16, scratch);
+    high_dsd = @set_dsd_base_addr(high_dsd, @ptrcast([*]u16, &words[1]));
+    low_dsd = @set_dsd_base_addr(low_dsd, words);
+    mask_dsd = @set_dsd_base_addr(mask_dsd, masks);
+}
+fn scale_down16() void {
+    @and16(mask_dsd, high_dsd, @as(u16, 0x7f80));
+    @sub16(mask_dsd, mask_dsd, @as(u16, 0x0880));
+    @sar16(mask_dsd, mask_dsd, @as(i16, 15));
+    @xor16(mask_dsd, mask_dsd, @as(u16, 0xffff));
+    @sub16(high_dsd, high_dsd, @as(u16, 0x0800));
+    @and16(high_dsd, high_dsd, mask_dsd);
+    @and16(low_dsd, low_dsd, mask_dsd);
+}

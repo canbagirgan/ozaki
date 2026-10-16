@@ -37,6 +37,12 @@ CHANNELS = 16
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--scaled-residual-fscale", action="store_true", help="Use scalar fscale_f32 only at the final compensated cross merge.")
+    parser.add_argument(
+        "--scaled-residual",
+        action="store_true",
+        help="3 products: store fp16(2**16 * fp32 residual), merge cross sum at 2**-16.",
+    )
     parser.add_argument(
         "--precision",
         choices=("fp16", "fp32"),
@@ -116,6 +122,8 @@ def config_name(
     twosum_a0b0_only: bool = False,
     twosum_cross_only: bool = False,
     fp64_merge: bool = False,
+    scaled_residual: bool = False,
+    scaled_residual_fscale: bool = False,
 ) -> str:
     if precision == "fp32":
         name = f"ozaki-fp32-fused-p{grid_size}-n{shape.n}-k{shape.k}-m{shape.m}"
@@ -151,6 +159,10 @@ def config_name(
         name = name.replace("twosum-", f"twosum-every{twosum_period}-", 1)
     if cross_f16:
         name = name.replace("skip-a1b1", "skip-a1b1-cross-f16", 1)
+    if scaled_residual:
+        name += "-scaled-residual" + ("-final-merge" if twosum else "")
+        if scaled_residual_fscale:
+            name += "-fscale"
     if start_barrier:
         name += "-start-barrier"
     return name
@@ -200,6 +212,15 @@ def fused_buffer_bytes(
 
 def main() -> None:
     args = parse_args()
+    if args.scaled_residual_fscale and not (args.scaled_residual and args.twosum):
+        raise ValueError("--scaled-residual-fscale requires --scaled-residual --twosum")
+    if args.scaled_residual and (
+        args.precision != "fp16" or args.n_products != 3
+        or args.cross_f16
+        or (args.twosum and (args.twosum_period != 10
+            or args.twosum_a0b0_only or args.twosum_cross_only or args.fp64_merge))
+    ):
+        raise ValueError("--scaled-residual requires fp16, n_products=3, no cross-f16; TwoSum supports period 10 only")
     if args.precision == "fp32":
         if args.twosum:
             raise ValueError("classic 2×f32 Ozaki has no TwoSum on this path")
@@ -269,6 +290,8 @@ def main() -> None:
         args.cross_f16,
         args.twosum_period,
     )
+    if args.scaled_residual:
+        fused_bytes += (12 if args.twosum else 4) * mt * nt
     budget = args.data_budget_kib * 1024
     if fused_bytes > budget:
         raise ValueError(
@@ -288,6 +311,8 @@ def main() -> None:
         args.twosum_a0b0_only,
         args.twosum_cross_only,
         args.fp64_merge,
+        args.scaled_residual,
+        args.scaled_residual_fscale,
     )
     artifact_root = ROOT / "artifacts" / "gemm" / name
     manifest_path = ROOT / "artifacts" / "gemm" / f"{name}.json"
@@ -312,7 +337,7 @@ def main() -> None:
             f"twosum_a0b0_only:{int(args.twosum_a0b0_only)},"
             f"twosum_cross_only:{int(args.twosum_cross_only)},"
             f"fp64_merge:{int(args.fp64_merge)},"
-            f"cross_f16:{int(args.cross_f16)}"
+            f"cross_f16:{int(args.cross_f16)},scaled_residual:{int(args.scaled_residual)},scaled_residual_fscale:{int(args.scaled_residual_fscale)}"
         )
     options = " ".join(
         [
@@ -349,6 +374,15 @@ def main() -> None:
         algorithm = "ozaki_fused"
         source = (
             "WaferLLM MeshGEMM fused Ozaki: A0B0 @fmachs, A0B1/A1B0 @fmach, skip A1B1"
+        )
+        precision_name = "fp16xfp32"
+    elif args.n_products == 3 and args.scaled_residual:
+        algorithm = "ozaki_fused"
+        source = (
+            "WaferLLM MeshGEMM: separate A0B0 and scaled cross accumulators, "
+            "one final cross rescaling and compensated merge"
+            if args.twosum else
+            "WaferLLM MeshGEMM: separate FP32 A0B0/cross sums, final cross rescaling"
         )
         precision_name = "fp16xfp32"
     elif args.n_products == 3:
@@ -409,6 +443,9 @@ def main() -> None:
         "twosum_cross_only": bool(args.twosum_cross_only),
         "fp64_merge": bool(args.fp64_merge),
         "cross_f16": bool(args.cross_f16),
+        "scaled_residual": bool(args.scaled_residual),
+        "scaled_residual_fscale": bool(args.scaled_residual_fscale),
+        "scaled_residual_final_merge": bool(args.scaled_residual),
         "source": source,
         "created_at": utc_now_iso(),
         "name": name,

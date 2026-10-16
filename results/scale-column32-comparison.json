@@ -1,0 +1,139 @@
+{
+  "date": "2026-10-15",
+  "sdk": "2.10.1",
+  "execution": "WSE-3 simulator, x86_64 Lima/Singularity",
+  "shape": {
+    "n": 128,
+    "k": 8,
+    "m": 8
+  },
+  "grid_size": 4,
+  "local_tile": {
+    "mt": 32,
+    "kt": 2,
+    "nt": 2
+  },
+  "product_vector_length": 32,
+  "n_products": 3,
+  "twosum_period": 10,
+  "input_kind": "ozimmu",
+  "phi": 1.0,
+  "seed": 7,
+  "warmup": 1,
+  "repetitions": 2,
+  "channels": 1,
+  "start_barrier": false,
+  "simulator_tracing": false,
+  "timing": "slowest-PE kernel TSC",
+  "clock_mhz_assumption": 1400,
+  "implementations": {
+    "scalar": "high-halfword subtraction and scalar exponent/underflow branch",
+    "vector": "seven 16-bit integer DSD operations; descriptor initialization outside timed region",
+    "unscaled": "original unscaled FP16 two-slice, three-product TwoSum-every10 kernel",
+    "final_merge": "Complete the cross sum in scaled units, rescale both words once, then combine with A0B0.",
+    "final_merge_fscale": "Same completed cross reduction and compensated final merge as final_merge, with scalar SDK math.fscale_f32 on both cross words at the end."
+  },
+  "runs": {
+    "scalar": {
+      "kernel_cycles": [
+        30522,
+        30520
+      ],
+      "median_cycles": 30521.0,
+      "relative_frobenius_error": 7.164234771455125e-08,
+      "max_absolute_error": 1.6320043023654307e-06,
+      "helper_sha256": "413cf039e57a072912f54b106ab5703457b15c18e8deef61b7cc2bd41b6e5eac",
+      "run_id": "ozaki-fused-skip-a1b1-scaled-residual-twosum-every10-ozimmu-phi1-p4-128-8-8-1792085487191976473",
+      "scaled_residual": true,
+      "scaling_stage": "per_cross_product_contribution"
+    },
+    "vector": {
+      "kernel_cycles": [
+        13978,
+        13978
+      ],
+      "median_cycles": 13978.0,
+      "relative_frobenius_error": 7.164234771455125e-08,
+      "max_absolute_error": 1.6320043023654307e-06,
+      "helper_sha256": "7d683a838c307b9ef04470e537440f9042dd77a506e2d81fb838732b124bb572",
+      "run_id": "ozaki-fused-skip-a1b1-scaled-residual-twosum-every10-ozimmu-phi1-p4-128-8-8-1792085488924189499",
+      "scaled_residual": true,
+      "scaling_stage": "per_cross_product_contribution"
+    },
+    "unscaled": {
+      "scaled_residual": false,
+      "kernel_cycles": [
+        6408,
+        6406
+      ],
+      "median_cycles": 6407.0,
+      "relative_frobenius_error": 7.632435586084008e-08,
+      "max_absolute_error": 1.6096525605746592e-06,
+      "run_id": "ozaki-fused-skip-a1b1-twosum-every10-ozimmu-phi1-p4-128-8-8-1792086729358868473",
+      "shutdown_note": "Both measured samples and validation were collected; SDK shutdown did not return and the runtime was terminated afterward.",
+      "scaling_stage": "none"
+    },
+    "final_merge": {
+      "scaled_residual": true,
+      "scaling_stage": "after_complete_cross_reduction",
+      "kernel_cycles": [
+        7882,
+        7882
+      ],
+      "median_cycles": 7882.0,
+      "relative_frobenius_error": 7.379860417811781e-08,
+      "max_absolute_error": 2.1498496067806627e-06,
+      "fused_buffer_bytes": 2848,
+      "helper_sha256": "7d683a838c307b9ef04470e537440f9042dd77a506e2d81fb838732b124bb572",
+      "kernel_source_sha256": "bc120e0200d8bc91c80b2bdd60ca09cf6d7a851b46cd13362abbc6dc299721db",
+      "run_id": "ozaki-fused-skip-a1b1-scaled-residual-final-merge-twosum-every10-ozimmu-phi1-p4-128-8-8-1792087574627315119",
+      "compensation_schedule": "Independent main/cross buckets, each flushed every 10 contributions and at the tail; compensated final merge."
+    },
+    "final_merge_fscale": {
+      "scaled_residual": true,
+      "scaled_residual_fscale": true,
+      "scaling_stage": "after_complete_cross_reduction",
+      "kernel_cycles": [
+        9000,
+        9000
+      ],
+      "median_cycles": 9000.0,
+      "relative_frobenius_error": 7.379860417811781e-08,
+      "max_absolute_error": 2.1498496067806627e-06,
+      "run_id": "ozaki-fused-skip-a1b1-scaled-residual-final-merge-fscale-twosum-every10-ozimmu-phi1-p4-128-8-8-1792088571698293367",
+      "kernel_source_sha256": "2ac47c759384c7fcd02e9cd4db54dc6f7dc33f082c419e41fe56f5c41a6a2560"
+    }
+  },
+  "result_words_bitwise_equal": {
+    "hi": true,
+    "lo": true
+  },
+  "scalar_over_vector_cycles": 2.1835026470167405,
+  "reference_input_checksums": {
+    "a_sum": -24.554791947710328,
+    "b_sum": 5.809921946492977
+  },
+  "input_checksums_match_scaled_runs": true,
+  "bitwise_equality_scope": [
+    "scalar",
+    "vector"
+  ],
+  "vector_over_unscaled_cycles": 2.1816762915561103,
+  "relative_error_reduction_with_vector_scaling": 0.06134356580519851,
+  "final_merge_tail_verification": {
+    "shape": {
+      "k": 12,
+      "m": 8,
+      "n": 128
+    },
+    "relative_frobenius_error": 9.101917445429803e-08,
+    "passed": true
+  },
+  "final_merge_over_unscaled_cycles": 1.230216950210707,
+  "cycle_reduction_final_vs_per_contribution_vector": 0.4361138932608385,
+  "final_vector_fscale_bitwise_equal": {
+    "hi": true,
+    "lo": true
+  },
+  "final_vector_cycle_reduction_vs_fscale": 0.12422222222222223
+}

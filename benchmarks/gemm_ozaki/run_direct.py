@@ -30,6 +30,12 @@ RECORD_PREFIX = "OZAKI_RECORD "
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--scaled-residual-fscale", action="store_true", help="Use scalar fscale_f32 only at the final compensated cross merge.")
+    parser.add_argument(
+        "--scaled-residual",
+        action="store_true",
+        help="3 products: store fp16(2**16 * fp32 residual), merge cross sum at 2**-16.",
+    )
     parser.add_argument("--name", required=True)
     parser.add_argument(
         "--cmaddr",
@@ -169,6 +175,8 @@ def accumulate_tag(
     if args.n_products == 4:
         return "fused_twosum_fp32x2" if args.twosum else "fused_on_wafer_fp32"
     if args.n_products == 3:
+        if args.scaled_residual:
+            return "fused_skip_a1b1_scaled_residual" + ("_twosum_every10_final_merge" if args.twosum else "")
         if args.cross_f16:
             return "fused_skip_a1b1_cross_f16"
         return (
@@ -200,6 +208,7 @@ try:
         reconstruct_twosum_fp64,
         residual_split_fp16,
         residual_split_fp32,
+        scaled_residual_split_fp16,
         ten_product_twosum_fp64,
         sixteen_product_fp32,
         slice_diagnostics,
@@ -230,6 +239,7 @@ except ImportError:
         reconstruct_twosum_fp64,
         residual_split_fp16,
         residual_split_fp32,
+        scaled_residual_split_fp16,
         ten_product_twosum_fp64,
         sixteen_product_fp32,
         slice_diagnostics,
@@ -306,6 +316,15 @@ def decode_cycle_summary(timer_values: np.ndarray) -> dict:
 
 def main() -> None:
     args = parse_args()
+    if args.scaled_residual_fscale and not (args.scaled_residual and args.twosum):
+        raise ValueError("--scaled-residual-fscale requires --scaled-residual --twosum")
+    if args.scaled_residual and (
+        args.precision != "fp16" or args.n_products != 3
+        or args.cross_f16
+        or (args.twosum and (args.twosum_period != 10
+            or args.twosum_a0b0_only or args.twosum_cross_only or args.fp64_merge))
+    ):
+        raise ValueError("--scaled-residual requires fp16, n_products=3, no cross-f16; TwoSum supports period 10 only")
     if args.dump_pe_map and args.grid_size >= 640:
         raise SystemExit(
             f"--dump-pe-map is forbidden on P={args.grid_size} (>=640)"
@@ -452,6 +471,12 @@ def main() -> None:
     else:
         a0_src, a1_src, a2_src = a_slices.high, a_slices.low, None
         b0_src, b1_src, b2_src = b_slices.high, b_slices.low, None
+    if args.scaled_residual:
+        # The split helper scales in FP32, before the residual is rounded to FP16.
+        a0_src, a1_src = scaled_residual_split_fp16(a)
+        b0_src, b1_src = scaled_residual_split_fp16(b)
+        a_slices = type(a_slices)(a0_src, np.ldexp(a1_src.astype(np.float32), -16))
+        b_slices = type(b_slices)(b0_src, np.ldexp(b1_src.astype(np.float32), -16))
     a0_host = encode(tile_X(a0_src, p, mt, kt))
     b0_host = encode(tile_W(shuffle_b(b0_src, p), p, kt, nt))
     a1_host = None
@@ -497,8 +522,13 @@ def main() -> None:
         )
         if args.twosum:
             fused_bytes += 4 * mt * nt + 24 * mt
+            if args.twosum_period != 1:
+                fused_bytes += 4 * mt * nt
     if args.cross_f16:
         fused_bytes += 2 * mt * nt
+
+    if args.scaled_residual:
+        fused_bytes += (12 if args.twosum else 4) * mt * nt
 
     useful_flops = 2 * args.n * args.k * args.m
     ozaki_flops = args.n_products * useful_flops
@@ -525,6 +555,8 @@ def main() -> None:
         mode = "fused-skip-a1b1-cross-f16" if args.cross_f16 else "fused-skip-a1b1"
     else:
         mode = "fused"
+    if args.scaled_residual:
+        mode += "-scaled-residual-final-merge" + ("-fscale" if args.scaled_residual_fscale else "")
     if args.twosum and args.twosum_period != 1:
         mode = f"{mode}-twosum-every{args.twosum_period}"
     elif args.twosum and args.twosum_a0b0_only:
@@ -846,6 +878,8 @@ def main() -> None:
                     "dual_c": bool(dual_c),
                     "twosum": bool(args.twosum),
                     "cross_f16": bool(args.cross_f16),
+                    "scaled_residual": bool(args.scaled_residual),
+                    "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                     "shape": {"n": args.n, "k": args.k, "m": args.m},
                 }
                 validation.update(input_record_fields(args))
@@ -907,6 +941,8 @@ def main() -> None:
                         "twosum_cross_only": bool(args.twosum_cross_only),
                         "fp64_merge": bool(args.fp64_merge),
                         "cross_f16": bool(args.cross_f16),
+                        "scaled_residual": bool(args.scaled_residual),
+                        "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                         "precision": record_precision,
                         "fused_buffer_bytes": fused_bytes,
                         "shape": validation["shape"],
@@ -1005,6 +1041,7 @@ def main() -> None:
                     validation.update(input_record_fields(args))
                     validation["twosum"] = bool(args.twosum)
                     validation["cross_f16"] = bool(args.cross_f16)
+                    validation["scaled_residual_slices"] = bool(args.scaled_residual)
                     validation["dual_c"] = bool(dual_c)
                     validation["n_slices"] = n_slices
                     if fused_bytes is not None:
@@ -1116,7 +1153,15 @@ def main() -> None:
                             else "fused_on_wafer_fp32"
                         )
                     elif args.n_products == 3:
-                        if args.cross_f16:
+                        if args.scaled_residual:
+                            a0 = a0_src.astype(np.float32)
+                            b0 = b0_src.astype(np.float32)
+                            a1 = a1_src.astype(np.float32)
+                            b1 = b1_src.astype(np.float32)
+                            cross = np.matmul(a0, b1) + np.matmul(a1, b0)
+                            host_oracle = np.matmul(a0, b0) + np.ldexp(cross, -16)
+                            accumulate = "fused_skip_a1b1_scaled_residual" + ("_twosum_every10_final_merge" if args.twosum else "")
+                        elif args.cross_f16:
                             host_oracle = three_product_cross_f16(
                                 a_slices.high, a_slices.low, b_slices.high, b_slices.low
                             )
@@ -1153,6 +1198,7 @@ def main() -> None:
                     validation.update(input_record_fields(args))
                     validation["twosum"] = bool(args.twosum)
                     validation["cross_f16"] = bool(args.cross_f16)
+                    validation["scaled_residual_slices"] = bool(args.scaled_residual)
                     validation["dual_c"] = bool(dual_c)
                     validation["n_slices"] = n_slices
                     if fused_bytes is not None:
@@ -1175,6 +1221,8 @@ def main() -> None:
                         "twosum_cross_only": bool(args.twosum_cross_only),
                         "fp64_merge": bool(args.fp64_merge),
                         "cross_f16": bool(args.cross_f16),
+                        "scaled_residual": bool(args.scaled_residual),
+                        "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                         "precision": record_precision,
                         "fused_buffer_bytes": fused_bytes,
                         "shape": validation["shape"],
@@ -1206,6 +1254,8 @@ def main() -> None:
                     **input_record_fields(args),
                     "twosum": bool(args.twosum),
                     "cross_f16": bool(args.cross_f16),
+                    "scaled_residual": bool(args.scaled_residual),
+                    "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                     "accumulate": validation["accumulate"],
                     "flops": useful_flops,
                     "ozaki_flops": ozaki_flops,
@@ -1256,6 +1306,8 @@ def main() -> None:
                         "twosum_cross_only": bool(args.twosum_cross_only),
                         "fp64_merge": bool(args.fp64_merge),
                         "cross_f16": bool(args.cross_f16),
+                        "scaled_residual": bool(args.scaled_residual),
+                        "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                         "precision": record_precision,
                         "shape": {"n": args.n, "k": args.k, "m": args.m},
                         "grid": {"width": p, "height": p},
@@ -1276,6 +1328,8 @@ def main() -> None:
                 "n_products": args.n_products,
                 "twosum": bool(args.twosum),
                 "cross_f16": bool(args.cross_f16),
+                "scaled_residual": bool(args.scaled_residual),
+                "scaled_residual_fscale": bool(args.scaled_residual_fscale),
                 "precision": record_precision,
                 "shape": {"n": args.n, "k": args.k, "m": args.m},
                 "runtime_startup_s": startup_s,
