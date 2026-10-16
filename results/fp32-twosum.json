@@ -1,0 +1,94 @@
+{
+  "channels": 1,
+  "date": "2026-10-15",
+  "execution": "WSE-3 simulator, x86_64 Lima/Singularity",
+  "grid_size": 4,
+  "input_kind": "ozimmu",
+  "kernel": "benchmarks/gemm_mesh/src/meshgemm_fused_fp32.csl",
+  "local_tile": {
+    "kt": 2,
+    "mt": 32,
+    "nt": 2
+  },
+  "notes": [
+    "Only FP32 two-slice TwoSum runs are retained; other local experiment comparisons were removed.",
+    "Scalar FP32 multiplication, vector bucket addition and vector TwoSum. All four slice products retained.",
+    "Simulator worker copies allowed grid size 4 and disabled traces. Both measured outputs matched bitwise.",
+    "SDK shutdown repeated stopping messages after both compensated samples; processes were terminated after collecting outputs."
+  ],
+  "phi": 1.0,
+  "reference": {
+    "dtype": "float64",
+    "inputs": "original FP64 A and B before splitting",
+    "operator": "numpy.matmul",
+    "primary_metric": "relative Frobenius error against original FP64 A @ B",
+    "result": "float64(res) + float64(res_lo)"
+  },
+  "repetitions": 2,
+  "runs": {
+    "every1": {
+      "fp64_reference_metrics": {
+        "abs_error_p50": 9.912745957407765e-09,
+        "abs_error_p99": 1.8863330681462263e-07,
+        "abs_error_p99_9": 3.361675886974829e-07,
+        "frobenius_error": 1.3481844426588726e-06,
+        "max_abs_error": 3.560923964585072e-07,
+        "max_abs_reference": 19.988654840727843,
+        "mean_abs_error": 2.156319352724723e-08,
+        "reference_frobenius_norm": 59.841661332519074,
+        "relative_frobenius_error": 2.2529194755598204e-08,
+        "relative_max_error": 1.781472536775971e-08,
+        "rms_abs_error": 4.213076383308976e-08
+      },
+      "max_elementwise_relative_error": 7.119806265189152e-06,
+      "max_pe_cycles": [
+        76929,
+        76932
+      ],
+      "median_cycles": 76930.5,
+      "output_sha256": "3aabe6c71d80e73f4f8c2e08fcb708f10c49966cc502fe0b918499381ddcb1fa",
+      "relative_frobenius_error": 2.2529194755598204e-08,
+      "relative_max_error": 1.781472536775971e-08,
+      "repeats_bitwise_equal": true,
+      "sdk_shutdown": "repeated stopping message; terminated after both samples completed"
+    },
+    "every10": {
+      "fp64_reference_metrics": {
+        "abs_error_p50": 1.960094672681656e-08,
+        "abs_error_p99": 4.0861170536032887e-07,
+        "abs_error_p99_9": 7.300386565596286e-07,
+        "frobenius_error": 2.769771407685648e-06,
+        "max_abs_error": 9.014426289866151e-07,
+        "max_abs_reference": 19.988654840727843,
+        "mean_abs_error": 4.15354892374977e-08,
+        "reference_frobenius_norm": 59.841661332519074,
+        "relative_frobenius_error": 4.6285001886812636e-08,
+        "relative_max_error": 4.5097713486446445e-08,
+        "rms_abs_error": 8.65553564901765e-08
+      },
+      "max_elementwise_relative_error": 1.2452857597507376e-05,
+      "max_pe_cycles": [
+        56606,
+        56604
+      ],
+      "median_cycles": 56605.0,
+      "output_sha256": "e0d0ac2f0e2d180717beacce5a7ed1222c8673534aa87db59430ccbc1f501474",
+      "relative_frobenius_error": 4.6285001886812636e-08,
+      "relative_max_error": 4.5097713486446445e-08,
+      "repeats_bitwise_equal": true,
+      "sdk_shutdown": "repeated stopping message; terminated after both samples completed"
+    }
+  },
+  "sdk": "2.10.1",
+  "seed": 7,
+  "shape": {
+    "k": 8,
+    "m": 8,
+    "n": 128
+  },
+  "simulator_tracing": false,
+  "source_dtype": "float64",
+  "start_barrier": false,
+  "twosum_period_units": "rank-1 slice products (four per K position)",
+  "warmup": 1
+}

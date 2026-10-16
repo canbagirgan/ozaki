@@ -37,12 +37,6 @@ CHANNELS = 16
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scaled-residual-fscale", action="store_true", help="Use scalar fscale_f32 only at the final compensated cross merge.")
-    parser.add_argument(
-        "--scaled-residual",
-        action="store_true",
-        help="3 products: store fp16(2**16 * fp32 residual), merge cross sum at 2**-16.",
-    )
     parser.add_argument(
         "--precision",
         choices=("fp16", "fp32"),
@@ -68,9 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--twosum-period",
         type=int,
-        choices=(1, 5, 10, 32, 128),
         default=1,
-        help="1 = TwoSum every product. 5 or 10 = that many products into a bucket, then one TwoSum. n_products=3 only.",
+        help="Rank-1 slice products per TwoSum bucket. FP32: any integer 1..32767; FP16 n_products=3: 1,5,10,32,128. Must match compile.",
     )
     parser.add_argument(
         "--twosum-a0b0-only",
@@ -122,11 +115,11 @@ def config_name(
     twosum_a0b0_only: bool = False,
     twosum_cross_only: bool = False,
     fp64_merge: bool = False,
-    scaled_residual: bool = False,
-    scaled_residual_fscale: bool = False,
 ) -> str:
     if precision == "fp32":
         name = f"ozaki-fp32-fused-p{grid_size}-n{shape.n}-k{shape.k}-m{shape.m}"
+        if twosum:
+            name += f"-scalar-mul-vector-add-twosum-every{twosum_period}"
         if start_barrier:
             name += "-start-barrier"
         return name
@@ -159,10 +152,6 @@ def config_name(
         name = name.replace("twosum-", f"twosum-every{twosum_period}-", 1)
     if cross_f16:
         name = name.replace("skip-a1b1", "skip-a1b1-cross-f16", 1)
-    if scaled_residual:
-        name += "-scaled-residual" + ("-final-merge" if twosum else "")
-        if scaled_residual_fscale:
-            name += "-fscale"
     if start_barrier:
         name += "-start-barrier"
     return name
@@ -180,7 +169,10 @@ def fused_buffer_bytes(
 ) -> int:
     if precision == "fp32":
         # Double-buffer A0,A1,B0,B1 + one f32 C = 16+16+4 = 36 T^2 (square).
-        return 16 * mt * kt + 16 * kt * nt + 4 * mt * nt
+        return (
+            16 * mt * kt + 16 * kt * nt + 4 * mt * nt
+            + (8 * mt * nt + 24 * mt if twosum else 0)
+        )
     if n_products == 10:
         # Always TwoSum. A0/A1/B0/B1 stay double-buffered; A2/A3/B2/B3
         # are single-buffered (recv aliases the A1/B1 send tile, then copy).
@@ -212,25 +204,22 @@ def fused_buffer_bytes(
 
 def main() -> None:
     args = parse_args()
-    if args.scaled_residual_fscale and not (args.scaled_residual and args.twosum):
-        raise ValueError("--scaled-residual-fscale requires --scaled-residual --twosum")
-    if args.scaled_residual and (
-        args.precision != "fp16" or args.n_products != 3
-        or args.cross_f16
-        or (args.twosum and (args.twosum_period != 10
-            or args.twosum_a0b0_only or args.twosum_cross_only or args.fp64_merge))
-    ):
-        raise ValueError("--scaled-residual requires fp16, n_products=3, no cross-f16; TwoSum supports period 10 only")
+    if not 1 <= args.twosum_period <= 32767:
+        raise ValueError("--twosum-period must be in [1, 32767]")
+    if args.twosum_period != 1 and not args.twosum:
+        raise ValueError("--twosum-period requires --twosum")
     if args.precision == "fp32":
-        if args.twosum:
-            raise ValueError("classic 2×f32 Ozaki has no TwoSum on this path")
+        if args.fp64_merge:
+            raise ValueError("--fp64-merge is only supported by the FP16 path")
         if args.n_products != 4:
             raise ValueError("classic 2×f32 Ozaki is n_products=4 only")
     if args.twosum_period != 1:
         if not args.twosum:
             raise ValueError("--twosum-period requires --twosum")
-        if args.n_products != 3:
-            raise ValueError("--twosum-period is n_products=3 only")
+        if args.precision != "fp32" and (
+            args.n_products != 3 or args.twosum_period not in (5, 10, 32, 128)
+        ):
+            raise ValueError("FP16 periodic TwoSum requires n_products=3 and period 5, 10, 32, or 128")
     if args.twosum_a0b0_only:
         if not args.twosum:
             raise ValueError("--twosum-a0b0-only requires --twosum")
@@ -290,8 +279,6 @@ def main() -> None:
         args.cross_f16,
         args.twosum_period,
     )
-    if args.scaled_residual:
-        fused_bytes += (12 if args.twosum else 4) * mt * nt
     budget = args.data_budget_kib * 1024
     if fused_bytes > budget:
         raise ValueError(
@@ -311,8 +298,6 @@ def main() -> None:
         args.twosum_a0b0_only,
         args.twosum_cross_only,
         args.fp64_merge,
-        args.scaled_residual,
-        args.scaled_residual_fscale,
     )
     artifact_root = ROOT / "artifacts" / "gemm" / name
     manifest_path = ROOT / "artifacts" / "gemm" / f"{name}.json"
@@ -326,7 +311,8 @@ def main() -> None:
         layout = "layout_fused_fp32.csl"
         params = (
             f"P:{args.grid_size},Mt:{mt},Kt:{kt},Nt:{nt},"
-            f"start_barrier:{int(args.start_barrier)}"
+            f"start_barrier:{int(args.start_barrier)},"
+            f"twosum:{int(args.twosum)},twosum_period:{args.twosum_period}"
         )
     else:
         layout = "layout_fused.csl"
@@ -337,7 +323,7 @@ def main() -> None:
             f"twosum_a0b0_only:{int(args.twosum_a0b0_only)},"
             f"twosum_cross_only:{int(args.twosum_cross_only)},"
             f"fp64_merge:{int(args.fp64_merge)},"
-            f"cross_f16:{int(args.cross_f16)},scaled_residual:{int(args.scaled_residual)},scaled_residual_fscale:{int(args.scaled_residual_fscale)}"
+            f"cross_f16:{int(args.cross_f16)}"
         )
     options = " ".join(
         [
@@ -364,7 +350,10 @@ def main() -> None:
 
     if args.precision == "fp32":
         algorithm = "ozaki_fp32_fused"
-        source = "WaferLLM MeshGEMM classic Ozaki: four @fmacs of 2×f32 slices"
+        source = (
+            "WaferLLM MeshGEMM 2×f32: scalar multiply, vector bucket add and TwoSum"
+            if args.twosum else "WaferLLM MeshGEMM classic Ozaki: four @fmacs of 2×f32 slices"
+        )
         precision_name = "fp64_2xfp32"
     elif args.n_products == 1:
         algorithm = "ozaki_fused"
@@ -374,15 +363,6 @@ def main() -> None:
         algorithm = "ozaki_fused"
         source = (
             "WaferLLM MeshGEMM fused Ozaki: A0B0 @fmachs, A0B1/A1B0 @fmach, skip A1B1"
-        )
-        precision_name = "fp16xfp32"
-    elif args.n_products == 3 and args.scaled_residual:
-        algorithm = "ozaki_fused"
-        source = (
-            "WaferLLM MeshGEMM: separate A0B0 and scaled cross accumulators, "
-            "one final cross rescaling and compensated merge"
-            if args.twosum else
-            "WaferLLM MeshGEMM: separate FP32 A0B0/cross sums, final cross rescaling"
         )
         precision_name = "fp16xfp32"
     elif args.n_products == 3:
@@ -443,9 +423,6 @@ def main() -> None:
         "twosum_cross_only": bool(args.twosum_cross_only),
         "fp64_merge": bool(args.fp64_merge),
         "cross_f16": bool(args.cross_f16),
-        "scaled_residual": bool(args.scaled_residual),
-        "scaled_residual_fscale": bool(args.scaled_residual_fscale),
-        "scaled_residual_final_merge": bool(args.scaled_residual),
         "source": source,
         "created_at": utc_now_iso(),
         "name": name,

@@ -12,8 +12,6 @@ param twosum_a0b0_only: i16 = 0;
 param twosum_cross_only: i16 = 0;
 param fp64_merge: i16 = 0;
 param cross_f16: i16 = 0;
-param scaled_residual: i16 = 0;
-param scaled_residual_fscale: i16 = 0;
 
 const X_0: color = @get_color(1);
 const X_1: color = @get_color(2);
@@ -77,7 +75,7 @@ layout {
                 .memcpy_params = memcpy_params,
                 .comm_params = comm_params,
                 .sync_params = sync.get_params(px, py),
-                .P = P, .Mt = Mt, .Kt = Kt, .Nt = Nt, .n_products = n_products, .n_slices = n_slices, .start_barrier = start_barrier, .twosum = twosum, .twosum_period = twosum_period, .twosum_a0b0_only = twosum_a0b0_only, .twosum_cross_only = twosum_cross_only, .fp64_merge = fp64_merge, .cross_f16 = cross_f16, .scaled_residual = scaled_residual, .scaled_residual_fscale = scaled_residual_fscale
+                .P = P, .Mt = Mt, .Kt = Kt, .Nt = Nt, .n_products = n_products, .n_slices = n_slices, .start_barrier = start_barrier, .twosum = twosum, .twosum_period = twosum_period, .twosum_a0b0_only = twosum_a0b0_only, .twosum_cross_only = twosum_cross_only, .fp64_merge = fp64_merge, .cross_f16 = cross_f16
             });
 
             {

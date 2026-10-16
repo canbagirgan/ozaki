@@ -47,11 +47,6 @@ param twosum_a0b0_only: i16 = 0;
 param twosum_cross_only: i16 = 0;
 // 1 = A0B1/A1B0 use @fmach into an f16 tile, then one @faddhs into C.
 param cross_f16: i16 = 0;
-// A1/B1 arrive as fp16(2^16 * (source - fp32(high))). Three products only.
-// Separate main/cross accumulators; rescale the completed cross sum only at the end.
-param scaled_residual: i16 = 0;
-param scaled_residual_fscale: i16 = 0;
-const math = @import_module("<math>");
 // 1 = replace (C_hi, C_lo) with the IEEE fp64 sum, split across the two words.
 param fp64_merge: i16 = 0;
 
@@ -151,20 +146,6 @@ var B4_1_tile: [b4_len]f16 = @zeros([b4_len]f16);
 var ptr_B4: [*]f16 = &B4_0_tile;
 var B4_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{1} -> B4_0_tile[i] });
 
-const scaled_cross_len: i16 = 1 + scaled_residual * (Mt * Nt - 1);
-var scaled_cross_tile: [scaled_cross_len]f32 = @zeros([scaled_cross_len]f32);
-var scaled_cross_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scaled_cross_len} -> scaled_cross_tile[i] });
-const scaled_aux_len: i16 = 1 + scaled_residual * use_twosum * (Mt * Nt - 1);
-var scaled_cross_lo_tile: [scaled_aux_len]f32 = @zeros([scaled_aux_len]f32);
-var scaled_cross_lo_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scaled_aux_len} -> scaled_cross_lo_tile[i] });
-var scaled_bucket_tile: [scaled_aux_len]f32 = @zeros([scaled_aux_len]f32);
-var scaled_bucket_all_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scaled_aux_len} -> scaled_bucket_tile[i] });
-var scaled_bucket_nprod: i16 = 0;
-const scaled_col_len: i16 = 1 + scaled_residual * (Mt - 1);
-const scaled_aux_col_len: i16 = 1 + scaled_residual * use_twosum * (Mt - 1);
-var scaled_hi_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scaled_col_len} -> scaled_cross_tile[i] });
-var scaled_lo_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scaled_aux_col_len} -> scaled_cross_lo_tile[i] });
-
 var res_tile: [Mt*Nt]f32 = @zeros([Mt*Nt]f32);
 var ptr_res: [*]f32 = &res_tile;
 var res_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> res_tile[i] });
@@ -195,13 +176,6 @@ var ptr_bucket: [*]f32 = &bucket_tile;
 var bucket_all_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{bucket_len} -> bucket_tile[i] });
 var bucket_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{bkt_col} -> bucket_tile[i] });
 var bucket_nprod: i16 = 0;
-// After both buckets are flushed, the main bucket is dead and serves as mask scratch.
-const cross_hi_scale = @import_module("fp32_product_scale.csl", .{
-    .size = scaled_cross_len, .products = &scaled_cross_tile, .scratch = &bucket_tile,
-});
-const cross_lo_scale = @import_module("fp32_product_scale.csl", .{
-    .size = scaled_aux_len, .products = &scaled_cross_lo_tile, .scratch = &bucket_tile,
-});
 var hi_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt} -> res_tile[i] });
 var lo_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{col_len} -> res_lo_tile[i] });
 var tile_copy_src = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{a3_len} -> A3_0_tile[i] });
@@ -348,10 +322,6 @@ var time_ref_f32 = @zeros([2]f32);
 var ptr_time_ref: [*]f32 = &time_ref_f32;
 
 fn init_task() void {
-    if (scaled_residual == 1 and use_twosum == 1 and scaled_residual_fscale == 0) {
-        cross_hi_scale.init();
-        cross_lo_scale.init();
-    }
     timestamp.enable_tsc();
     if (pack_a01 == 1) {
         ptr_A1 = @ptrcast([*]f16, &A0_0_tile[a1_off]);
@@ -472,21 +442,6 @@ fn fma_into_cross() void {
 fn promote_cross_into_c() void {
     if (cross_f16 == 1) {
         @faddhs(res_dsd, res_dsd, cross_dsd);
-    }
-}
-
-// Cross terms remain scaled throughout the GEMM; unscale only at final merge.
-fn fma_into_scaled_cross() void {
-    out_dsd = @set_dsd_base_addr(out_dsd, &scaled_cross_tile);
-    @load_to_dsr(out_dest_dsr, out_dsd, .{ .save_address = true });
-    @load_to_dsr(out_src0_dsr, out_dsd, .{ .save_address = true });
-}
-
-fn merge_scaled_cross() void {
-    if (scaled_residual == 1 and use_twosum == 0) {
-        for (@range(i16, Mt * Nt)) |i| {
-            res_tile[i] = res_tile[i] + math.fscale_f32(scaled_cross_tile[i], -16);
-        }
     }
 }
 
@@ -928,66 +883,6 @@ fn flush_bucket_tail() void {
     }
 }
 
-fn reset_scaled_bucket_columns() void {
-    bucket_col_dsd = @set_dsd_base_addr(bucket_col_dsd, &scaled_bucket_tile);
-    bucket_col_dsd = @set_dsd_length(bucket_col_dsd, @bitcast(u16, Mt));
-}
-
-fn flush_scaled_bucket() void {
-    hi_col_dsd = @set_dsd_base_addr(hi_col_dsd, &scaled_cross_tile);
-    lo_col_dsd = @set_dsd_base_addr(lo_col_dsd, &scaled_cross_lo_tile);
-    hi_col_dsd = @set_dsd_length(hi_col_dsd, @bitcast(u16, Mt));
-    lo_col_dsd = @set_dsd_length(lo_col_dsd, @bitcast(u16, Mt));
-    reset_scaled_bucket_columns();
-    var n: i16 = 0;
-    while (n < Nt) {
-        flush_bucket_column();
-        n += 1;
-    }
-    scaled_bucket_nprod = 0;
-}
-
-fn note_scaled_bucket_product() void {
-    scaled_bucket_nprod += 1;
-    if (scaled_bucket_nprod == twosum_period) {
-        flush_scaled_bucket();
-    }
-}
-
-fn finish_scaled_cross() void {
-    if (scaled_residual == 1 and use_twosum == 1) {
-        if (scaled_bucket_nprod > 0) {
-            flush_scaled_bucket();
-        }
-        // ONE final rescaling stage of the completed two-word cross sum.
-        // No scaling occurs in the K loop or at periodic bucket flushes.
-        if (scaled_residual_fscale == 1) {
-            for (@range(i16, Mt * Nt)) |i| {
-                scaled_cross_tile[i] = math.fscale_f32(scaled_cross_tile[i], -16);
-                scaled_cross_lo_tile[i] = math.fscale_f32(scaled_cross_lo_tile[i], -16);
-            }
-        } else {
-            cross_hi_scale.scale_down16();
-            cross_lo_scale.scale_down16();
-        }
-        reset_c_columns();
-        scaled_hi_col_dsd = @set_dsd_base_addr(scaled_hi_col_dsd, &scaled_cross_tile);
-        scaled_lo_col_dsd = @set_dsd_base_addr(scaled_lo_col_dsd, &scaled_cross_lo_tile);
-        var n: i16 = 0;
-        while (n < Nt) {
-            @fadds(p_dsd, scaled_hi_col_dsd, zero_dsd);
-            // Combine with A0B0 only now, preserving the merge rounding error.
-            twosum_add_column();
-            @fadds(lo_col_dsd, lo_col_dsd, scaled_lo_col_dsd);
-            hi_col_dsd = @increment_dsd_offset(hi_col_dsd, Mt, f32);
-            lo_col_dsd = @increment_dsd_offset(lo_col_dsd, Mt, f32);
-            scaled_hi_col_dsd = @increment_dsd_offset(scaled_hi_col_dsd, Mt, f32);
-            scaled_lo_col_dsd = @increment_dsd_offset(scaled_lo_col_dsd, Mt, f32);
-            n += 1;
-        }
-    }
-}
-
 fn mm_compute() void {
     swap_ptr = ptr_A0_send;
     ptr_A0_send = ptr_A0_recv;
@@ -1086,35 +981,7 @@ fn mm_compute() void {
         }
 
         for (@range(i16, Kt)) |k| {
-            if (scaled_residual == 1 and use_twosum == 0) {
-                fma_into_c();
-                @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
-                @map(gemv_static_step_X, B0_dsd);
-                fma_into_scaled_cross();
-                @map(gemv_static_step_X, B1_dsd);
-                fma_into_scaled_cross();
-                @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
-                @map(gemv_static_step_X, B0_dsd);
-                A1_dsd = @increment_dsd_offset(A1_dsd, Mt, f16);
-                B1_dsd = @increment_dsd_offset(B1_dsd, Nt, f16);
-            } else if (scaled_residual == 1) {
-                // The cross terms stay in scaled units through the full K reduction.
-                @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
-                reset_scaled_bucket_columns();
-                @map(gemv_into_bucket, B1_dsd);
-                note_scaled_bucket_product();
-                @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
-                reset_scaled_bucket_columns();
-                @map(gemv_into_bucket, B0_dsd);
-                note_scaled_bucket_product();
-                // A0B0 has its own unscaled bucket and two-word accumulator.
-                @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
-                reset_bucket_columns();
-                @map(gemv_into_bucket, B0_dsd);
-                note_bucket_product();
-                A1_dsd = @increment_dsd_offset(A1_dsd, Mt, f16);
-                B1_dsd = @increment_dsd_offset(B1_dsd, Nt, f16);
-            } else if (use_twosum == 1) {
+            if (use_twosum == 1) {
                 if (n_products == 16) {
                     @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
                     reset_c_columns();
@@ -1550,8 +1417,6 @@ fn mm_compute() void {
             promote_cross_into_c();
         }
         flush_bucket_tail();
-        merge_scaled_cross();
-        finish_scaled_cross();
         if (fp64_merge == 1) {
             merge_hi_lo_fp64();
         }
@@ -1701,14 +1566,6 @@ fn left_matrix_shift_callback() void {
             align_a2 = false;
             align_a3 = false;
             @fmovs(res_dsd, 0.0);
-            if (scaled_residual == 1) {
-                @fmovs(scaled_cross_dsd, 0.0);
-                if (use_twosum == 1) {
-                    @fmovs(scaled_cross_lo_dsd, 0.0);
-                    @fmovs(scaled_bucket_all_dsd, 0.0);
-                    scaled_bucket_nprod = 0;
-                }
-            }
             if (use_c_lo == 1) {
                 @fmovs(res_lo_dsd, 0.0);
             }
@@ -1839,14 +1696,6 @@ fn left_matrix_shift_callback() void {
             align_a3 = false;
             align_a4 = false;
             @fmovs(res_dsd, 0.0);
-            if (scaled_residual == 1) {
-                @fmovs(scaled_cross_dsd, 0.0);
-                if (use_twosum == 1) {
-                    @fmovs(scaled_cross_lo_dsd, 0.0);
-                    @fmovs(scaled_bucket_all_dsd, 0.0);
-                    scaled_bucket_nprod = 0;
-                }
-            }
             if (use_c_lo == 1) {
                 @fmovs(res_lo_dsd, 0.0);
             }

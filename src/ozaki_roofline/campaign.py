@@ -7,7 +7,7 @@ are set they must agree. ``K`` and ``M`` default to ``N``.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ozaki_roofline.model import parse_grid_size, reject_large_pe_map
@@ -26,8 +26,6 @@ class Method:
     twosum_a0b0_only: bool = False
     twosum_cross_only: bool = False
     fp64_merge: bool = False
-    scaled_residual: bool = False
-    scaled_residual_fscale: bool = False
     cross_f16: bool = False
 
 
@@ -39,10 +37,6 @@ METHODS: dict[str, Method] = {
         "ozaki",
         "2-slice triangle: A0B0+A0B1+A1B0, skip A1B1.",
         n_products=3,
-    ),
-    "scaled-residual": Method(
-        "ozaki", "2-slice triangle, residuals scaled by 2**16 before FP16, FP32 cross sum.",
-        n_products=3, scaled_residual=True,
     ),
     "twosum": Method(
         "ozaki",
@@ -56,18 +50,6 @@ METHODS: dict[str, Method] = {
         n_products=3,
         twosum=True,
         twosum_period=5,
-    ),
-    "scaled-residual-final-vector": Method(
-        "ozaki", "Final-only vector scaling, independent TwoSum-every10 streams.",
-        n_products=3, scaled_residual=True, twosum=True, twosum_period=10,
-    ),
-    "scaled-residual-final-fscale": Method(
-        "ozaki", "Final-only fscale_f32 scaling, independent TwoSum-every10 streams.",
-        n_products=3, scaled_residual=True, scaled_residual_fscale=True, twosum=True, twosum_period=10,
-    ),
-    "scaled-residual-twosum-every10": Method(
-        "ozaki", "Scaled cross sum, independent TwoSum-every10 accumulators, one final rescaling.",
-        n_products=3, scaled_residual=True, twosum=True, twosum_period=10,
     ),
     "twosum-every10": Method(
         "ozaki",
@@ -146,6 +128,14 @@ METHODS: dict[str, Method] = {
         "Classic 2×fp32 Ozaki of float64 inputs.",
         precision="fp32",
         n_products=4,
+    ),
+    "fp32-ozaki-twosum": Method(
+        "ozaki", "2×FP32 slices, scalar multiply and vector TwoSum every product.",
+        precision="fp32", n_products=4, twosum=True,
+    ),
+    "fp32-ozaki-twosum-every10": Method(
+        "ozaki", "2×FP32 slices, scalar multiply/vector add, TwoSum every 10 products.",
+        precision="fp32", n_products=4, twosum=True, twosum_period=10,
     ),
     "int": Method("int", "Integer-slice Ozaki (shared exponent, i16 products)."),
     "u16x2": Method("u16", "Packed uint16×uint16 Ozaki."),
@@ -227,6 +217,7 @@ def measurement_commands(
     single_product: bool,
     seed: int,
     stage: str,
+    twosum_period: int | None = None,
 ) -> list[list[str]]:
     """Argv lists for the requested stage. Does not run them."""
 
@@ -238,6 +229,12 @@ def measurement_commands(
     if stage not in {"compile", "launch", "both"}:
         raise ValueError("stage must be compile, launch, or both")
     method = METHODS[method_name]
+    if twosum_period is not None:
+        if method.precision != "fp32" or method.family != "ozaki" or not method.twosum:
+            raise ValueError("--twosum-period override requires an fp32-ozaki-twosum method")
+        if not 1 <= twosum_period <= 32767:
+            raise ValueError("--twosum-period must be in [1, 32767]")
+        method = replace(method, twosum_period=twosum_period)
     if simulator and timing == "kernel":
         raise ValueError(
             "--simulator is a barrier-free simfabric run; use --timing e2e"
@@ -426,10 +423,6 @@ def _ozaki_flags(method: Method) -> list[str]:
         flags.append("--twosum-cross-only")
     if method.fp64_merge:
         flags.append("--fp64-merge")
-    if method.scaled_residual_fscale:
-        flags.append("--scaled-residual-fscale")
-    if method.scaled_residual:
-        flags.append("--scaled-residual")
     if method.cross_f16:
         flags.append("--cross-f16")
     return flags

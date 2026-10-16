@@ -403,6 +403,23 @@ class TwoSumTests(unittest.TestCase):
             word["against_float64_reference"]["relative_frobenius_error"],
         )
 
+    def test_periodic_twosum_cancellation_and_tail(self) -> None:
+        # Separate products lose the unit in a plain FP32 sum; TwoSum keeps it.
+        a0 = np.ones((1, 3), dtype=np.float32)
+        b0 = np.asarray([[2.0**24], [1.0], [-2.0**24]], dtype=np.float32)
+        a1 = np.zeros_like(a0)
+        b1 = np.zeros_like(b0)
+        self.assertEqual(four_product_twosum_fp64(a0, a1, b0, b1, period=1)[0, 0], 1.0)
+        # Seven products per bucket causes rounding before compensation.
+        self.assertEqual(four_product_twosum_fp64(a0, a1, b0, b1, period=7)[0, 0], 0.0)
+        # Twelve total products: both periods require a final partial flush.
+        for period in (7, 128):
+            result = four_product_twosum_fp64(a0, a1, np.ones_like(b0), b1, period=period)
+            self.assertEqual(result[0, 0], 3.0)
+        for period in (0, -1, 32768):
+            with self.assertRaises(ValueError):
+                four_product_twosum_fp64(a0, a1, b0, b1, period=period)
+
     def test_reconstruct_twosum_fp64_is_exact_f32_add(self) -> None:
         hi = np.asarray([[1.0]], dtype=np.float32)
         lo = np.asarray([[2.0**-24]], dtype=np.float32)

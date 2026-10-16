@@ -1,6 +1,6 @@
 // Classic Ozaki MeshGEMM: two float32 slices, four @fmacs into one fp32 C.
 // Control flow matches fused 2-slice (A0 then A1 two-hop, then compute).
-// No TwoSum, no fp16, no third slice.
+// Optional TwoSum: scalar f32 multiply, vector bucket add, periodic vector TwoSum.
 param memcpy_params;
 param comm_params;
 param sync_params;
@@ -12,6 +12,9 @@ param Nt: i16;
 // 1 = fabric start barrier before the timed kernel (on-wafer maps only).
 // 0 = no barrier. E2E (H2D + kernel + D2H) must stay at 0.
 param start_barrier: i16 = 0;
+param twosum: i16 = 0;
+// Number of rank-1 slice products per bucket (four products per K).
+param twosum_period: i16 = 1;
 
 var A0_0_tile: [Mt*Kt]f32 = @zeros([Mt*Kt]f32);
 var A0_1_tile: [Mt*Kt]f32 = @zeros([Mt*Kt]f32);
@@ -36,6 +39,33 @@ var B1_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Nt} -> B1_0_tile[i] });
 var res_tile: [Mt*Nt]f32 = @zeros([Mt*Nt]f32);
 var ptr_res: [*]f32 = &res_tile;
 var res_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{Mt*Nt} -> res_tile[i] });
+
+// Conditional storage keeps the original FP32 FMA baseline small.
+const accum_len: i16 = 1 + twosum * (Mt * Nt - 1);
+const scratch_len: i16 = 1 + twosum * (Mt - 1);
+var res_lo: [accum_len]f32 = @zeros([accum_len]f32);
+var ptr_res_lo: [*]f32 = &res_lo;
+var bucket: [accum_len]f32 = @zeros([accum_len]f32);
+var lo_all_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{accum_len} -> res_lo[i] });
+var bucket_all_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{accum_len} -> bucket[i] });
+var hi_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> res_tile[i] });
+var lo_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> res_lo[i] });
+var bucket_col_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> bucket[i] });
+var p_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var p_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> p_col[i] });
+var s_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var s_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> s_col[i] });
+var z_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var z_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> z_col[i] });
+var t_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var t_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> t_col[i] });
+var u_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var u_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> u_col[i] });
+var zero_col: [scratch_len]f32 = @zeros([scratch_len]f32);
+var zero_dsd = @get_dsd(mem1d_dsd, .{ .tensor_access = |i|{scratch_len} -> zero_col[i] });
+var product_input: [*]f32 = &A0_0_tile;
+var bucket_nprod: i16 = 0;
+var product_offset: i16 = 0;
 
 const sys_mod = @import_module("<memcpy/memcpy>", memcpy_params);
 const layout_module = @import_module("<layout>");
@@ -149,6 +179,48 @@ fn fma_into_c() void {
     @load_to_dsr(out_src0_dsr, out_dsd, .{ .save_address = true });
 }
 
+// Each scalar multiplication is rounded to FP32 before vector addition.
+fn scalar_mul_vector_add(curW: f32) void {
+    for (@range(i16, Mt)) |i| {
+        p_col[i] = product_input[product_offset + i] * curW;
+    }
+    @fadds(bucket_col_dsd, bucket_col_dsd, p_dsd);
+    bucket_col_dsd = @increment_dsd_offset(bucket_col_dsd, Mt, f32);
+}
+
+fn flush_bucket() void {
+    hi_col_dsd = @set_dsd_base_addr(hi_col_dsd, &res_tile);
+    lo_col_dsd = @set_dsd_base_addr(lo_col_dsd, &res_lo);
+    bucket_col_dsd = @set_dsd_base_addr(bucket_col_dsd, &bucket);
+    for (@range(i16, Nt)) |j| {
+        // Knuth TwoSum(hi, bucket); accumulate its residual into lo.
+        @fadds(s_dsd, hi_col_dsd, bucket_col_dsd);
+        @fsubs(z_dsd, s_dsd, hi_col_dsd);
+        @fsubs(t_dsd, s_dsd, z_dsd);
+        @fsubs(u_dsd, hi_col_dsd, t_dsd);
+        @fsubs(t_dsd, bucket_col_dsd, z_dsd);
+        @fadds(p_dsd, u_dsd, t_dsd);
+        @fadds(z_dsd, lo_col_dsd, p_dsd);
+        @fadds(lo_col_dsd, z_dsd, zero_dsd);
+        @fadds(hi_col_dsd, s_dsd, zero_dsd);
+        @fmovs(bucket_col_dsd, 0.0);
+        hi_col_dsd = @increment_dsd_offset(hi_col_dsd, Mt, f32);
+        lo_col_dsd = @increment_dsd_offset(lo_col_dsd, Mt, f32);
+        bucket_col_dsd = @increment_dsd_offset(bucket_col_dsd, Mt, f32);
+    }
+    bucket_nprod = 0;
+}
+
+fn add_slice_product(left: [*]f32, right: mem1d_dsd) void {
+    product_input = left;
+    bucket_col_dsd = @set_dsd_base_addr(bucket_col_dsd, &bucket);
+    @map(scalar_mul_vector_add, right);
+    bucket_nprod += 1;
+    if (bucket_nprod == twosum_period) {
+        flush_bucket();
+    }
+}
+
 fn mm_compute() void {
     swap_ptr = ptr_A0_send;
     ptr_A0_send = ptr_A0_recv;
@@ -179,22 +251,31 @@ fn mm_compute() void {
         B1_dsd = @set_dsd_length(B1_dsd, @bitcast(u16, Nt));
 
         for (@range(i16, Kt)) |k| {
-            // High-to-low into one fp32 C: A0B0, A0B1, A1B0, A1B1.
-            fma_into_c();
-            @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
-            @map(gemv_static_step_X, B0_dsd);
+            if (twosum == 1) {
+                product_offset = k * Mt;
+                add_slice_product(ptr_A0_send, B0_dsd);
+                add_slice_product(ptr_A0_send, B1_dsd);
+                add_slice_product(ptr_A1_send, B0_dsd);
+                add_slice_product(ptr_A1_send, B1_dsd);
+            } else {
+                // High-to-low into one fp32 C: A0B0, A0B1, A1B0, A1B1.
+                fma_into_c();
+                @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
+                @map(gemv_static_step_X, B0_dsd);
 
-            fma_into_c();
-            @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
-            @map(gemv_static_step_X, B1_dsd);
+                fma_into_c();
+                @load_to_dsr(X_src1_dsr, A0_dsd, .{ .save_address = false });
+                @map(gemv_static_step_X, B1_dsd);
 
-            fma_into_c();
-            @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
-            @map(gemv_static_step_X, B0_dsd);
+                fma_into_c();
+                @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
+                @map(gemv_static_step_X, B0_dsd);
 
-            fma_into_c();
-            @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
-            @map(gemv_static_step_X, B1_dsd);
+                fma_into_c();
+                @load_to_dsr(X_src1_dsr, A1_dsd, .{ .save_address = false });
+                @map(gemv_static_step_X, B1_dsd);
+
+            }
 
             A0_dsd = @increment_dsd_offset(A0_dsd, Mt, f32);
             B0_dsd = @increment_dsd_offset(B0_dsd, Nt, f32);
@@ -205,6 +286,9 @@ fn mm_compute() void {
         step += 1;
         @activate(next_step_id);
     } else {
+        if (twosum == 1 and bucket_nprod > 0) {
+            flush_bucket();
+        }
         step = 0;
         meshgemm_entry();
     }
@@ -312,6 +396,11 @@ fn left_matrix_shift_callback() void {
         slice_phase = 0;
         align_a1 = false;
         @fmovs(res_dsd, 0.0);
+        if (twosum == 1) {
+            @fmovs(lo_all_dsd, 0.0);
+            @fmovs(bucket_all_dsd, 0.0);
+            bucket_nprod = 0;
+        }
 
         ptr_B0_send = &B0_1_tile;
         ptr_B0_recv = &B0_0_tile;
@@ -387,6 +476,7 @@ comptime {
     @export_symbol(ptr_B0, "B0");
     @export_symbol(ptr_B1, "B1");
     @export_symbol(ptr_res, "res");
+    @export_symbol(ptr_res_lo, "res_lo");
 
     @export_symbol(init_task);
     @export_symbol(meshgemm_entry);

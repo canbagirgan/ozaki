@@ -1,7 +1,7 @@
-// Called only on the completed cross-sum tile at the final merge.
-// FP16 products and their FP32 TwoSum errors are multiples of 2^-48;
-// after scaling by 2^-16, nonzero words remain normal (>= 2^-64).
-// Guarded halfword-vector x*2^-16, with the same finite-input FTZ contract.
+// In-place vector FP32 x*2^-16 using integer operations on both halfwords.
+// Finite inputs only. Results below FP32 min-normal are flushed to +0.
+// Call init() once before scale_down16(); scratch must hold size u16 masks
+// and must not overlap products. The caller owns the scaling schedule.
 param size: i16;
 param products: [*]f32;
 param scratch: [*]f32;

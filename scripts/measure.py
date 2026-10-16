@@ -38,6 +38,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--list-methods", action="store_true")
     parser.add_argument("--method", choices=tuple(METHODS))
+    parser.add_argument(
+        "--twosum-period", type=int, default=None,
+        help="FP32 Ozaki TwoSum: override products per bucket (1..32767).",
+    )
     parser.add_argument("--grid-size", type=int)
     parser.add_argument("--n", type=int, help="Rows of A and C. Square default: K = M = N.")
     parser.add_argument("--k", type=int, help="Shared dimension. Default: N.")
@@ -108,6 +112,7 @@ def main() -> None:
         single_product=args.single_product,
         seed=args.seed,
         stage=args.stage,
+        twosum_period=args.twosum_period,
     )
     for command in commands:
         print(shlex.join(command), flush=True)

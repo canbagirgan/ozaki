@@ -4,6 +4,8 @@ param Kt: i16;
 param Nt: i16;
 // 1 = on-wafer kernel maps only. E2E compiles must leave this at 0.
 param start_barrier: i16 = 0;
+param twosum: i16 = 0;
+param twosum_period: i16 = 1;
 
 const X_0: color = @get_color(1);
 const X_1: color = @get_color(2);
@@ -67,7 +69,8 @@ layout {
                 .memcpy_params = memcpy_params,
                 .comm_params = comm_params,
                 .sync_params = sync.get_params(px, py),
-                .P = P, .Mt = Mt, .Kt = Kt, .Nt = Nt, .start_barrier = start_barrier
+                .P = P, .Mt = Mt, .Kt = Kt, .Nt = Nt, .start_barrier = start_barrier,
+                .twosum = twosum, .twosum_period = twosum_period
             });
 
             {
@@ -133,6 +136,7 @@ layout {
     @export_name("B0", [*]f32, true);
     @export_name("B1", [*]f32, true);
     @export_name("res", [*]f32, true);
+    @export_name("res_lo", [*]f32, true);
 
     @export_name("init_task", fn()void);
     @export_name("meshgemm_entry", fn()void);

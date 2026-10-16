@@ -58,6 +58,24 @@ class ResolveShapeTest(unittest.TestCase):
 
 
 class CommandTest(unittest.TestCase):
+    def test_fp32_twosum_methods(self) -> None:
+        for name, period in (("fp32-ozaki-twosum", 1), ("fp32-ozaki-twosum-every10", 10)):
+            for command in _cmds(method_name=name, tile=28):
+                self.assertEqual(command[command.index("--precision") + 1], "fp32")
+                self.assertEqual(command[command.index("--n-products") + 1], "4")
+                self.assertIn("--twosum", command)
+                if period != 1:
+                    self.assertEqual(command[command.index("--twosum-period") + 1], str(period))
+
+    def test_fp32_twosum_period_override(self) -> None:
+        for command in _cmds(method_name="fp32-ozaki-twosum", twosum_period=7):
+            self.assertEqual(command[command.index("--twosum-period") + 1], "7")
+        for period in (0, 32768):
+            with self.assertRaises(ValueError):
+                _cmds(method_name="fp32-ozaki-twosum", twosum_period=period)
+        with self.assertRaises(ValueError):
+            _cmds(method_name="fp32", twosum_period=7)
+
     def test_four_slice_triangle_kernel(self) -> None:
         compile_cmd, launch_cmd = _cmds(method_name="4slice-tri")
         self.assertTrue(compile_cmd[1].endswith("benchmarks/gemm_ozaki/compile.py"))
@@ -79,25 +97,6 @@ class CommandTest(unittest.TestCase):
         self.assertIn("--twosum", compile_cmd)
         self.assertEqual(compile_cmd[compile_cmd.index("--twosum-period") + 1], "10")
         self.assertEqual(compile_cmd[compile_cmd.index("--n-products") + 1], "3")
-
-    def test_scaled_residual(self) -> None:
-        compile_cmd, launch_cmd = _cmds(method_name="scaled-residual")
-        for cmd in (compile_cmd, launch_cmd):
-            self.assertIn("--scaled-residual", cmd)
-            self.assertEqual(cmd[cmd.index("--n-products") + 1], "3")
-
-    def test_scaled_residual_twosum_every10(self) -> None:
-        for cmd in _cmds(method_name="scaled-residual-twosum-every10"):
-            self.assertIn("--scaled-residual", cmd)
-            self.assertIn("--twosum", cmd)
-            self.assertEqual(cmd[cmd.index("--twosum-period") + 1], "10")
-
-    def test_final_scaling_implementations(self) -> None:
-        for method, fscale in (("scaled-residual-final-vector", False), ("scaled-residual-final-fscale", True)):
-            for cmd in _cmds(method_name=method):
-                self.assertIn("--scaled-residual", cmd)
-                self.assertIn("--twosum", cmd)
-                self.assertEqual("--scaled-residual-fscale" in cmd, fscale)
 
     def test_fp32_mesh(self) -> None:
         compile_cmd, _launch = _cmds(method_name="fp32")

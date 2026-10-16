@@ -247,20 +247,6 @@ class FiveSlice(NamedTuple):
     w4: np.ndarray
 
 
-def scaled_residual_split_fp16(matrix: np.ndarray) -> TwoSlice:
-    """Return FP16 high and 2**16-scaled low; low must be unscaled at merge.
-
-    Subtraction and scaling both happen in FP32, before casting the low slice.
-    """
-    source = np.asarray(matrix, dtype=np.float32)
-    with np.errstate(over="ignore", invalid="ignore"):
-        high = source.astype(np.float16)
-        low = np.ldexp(source - high.astype(np.float32), 16).astype(np.float16)
-    if not (np.isfinite(high).all() and np.isfinite(low).all()):
-        raise ValueError("source or scaled residual is outside finite FP16 range")
-    return TwoSlice(high, low)
-
-
 def residual_split_fp32(matrix: np.ndarray) -> TwoSlice:
     """Split a 2-D array stored as float64 into two float32 slices.
 
@@ -714,13 +700,18 @@ def four_product_twosum_fp64(
     a1: np.ndarray,
     b0: np.ndarray,
     b1: np.ndarray,
+    *,
+    period: int = 1,
 ) -> np.ndarray:
     """Device-like oracle: four rank-1 fp32 products, Knuth TwoSum into (hi, lo).
 
     Inner products are float32 multiplies (stand-in for ``@fmachs(p, 0, A, b)``).
-    The returned array is ``float64(hi) + float64(lo)``.
+    ``period`` rank-1 slice products enter an FP32 bucket before each TwoSum.
+    The final partial bucket is flushed. The returned array is ``float64(hi) + float64(lo)``.
     """
 
+    if not 1 <= period <= 32767:
+        raise ValueError("period must be in [1, 32767]")
     a0_32 = np.asarray(a0, dtype=np.float32)
     a1_32 = np.asarray(a1, dtype=np.float32)
     b0_32 = np.asarray(b0, dtype=np.float32)
@@ -730,10 +721,19 @@ def four_product_twosum_fp64(
     hi = np.zeros((n, m), dtype=np.float32)
     lo = np.zeros((n, m), dtype=np.float32)
     pairs = ((a0_32, b0_32), (a0_32, b1_32), (a1_32, b0_32), (a1_32, b1_32))
+    bucket = np.zeros_like(hi)
+    count = 0
     for kk in range(k):
         for left, right in pairs:
             product = left[:, kk : kk + 1] * right[kk : kk + 1, :]
-            hi, lo = twosum_add(hi, lo, product)
+            bucket = np.asarray(bucket + product, dtype=np.float32)
+            count += 1
+            if count == period:
+                hi, lo = twosum_add(hi, lo, bucket)
+                bucket.fill(0)
+                count = 0
+    if count:
+        hi, lo = twosum_add(hi, lo, bucket)
     return reconstruct_twosum_fp64(hi, lo)
 
 

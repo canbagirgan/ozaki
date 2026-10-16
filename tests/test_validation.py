@@ -113,6 +113,19 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(report["device_dtype"], "float64")
         self.assertLess(report["against_float64_reference"]["relative_frobenius_error"], 1e-15)
 
+    def test_two_word_result_uses_original_float64_reference(self) -> None:
+        a = np.asarray([[1.0 + 2.0**-30]], dtype=np.float64)
+        b = np.asarray([[1.0 + 2.0**-29]], dtype=np.float64)
+        c = a @ b
+        report = compare_device_gemm(a, b, c, precision="fp32")
+        self.assertTrue(report["two_word_result"])
+        self.assertEqual(report["source_dtype"], "float64")
+        self.assertEqual(report["against_float64_reference"]["max_abs_error"], 0.0)
+        rounded_sources = compare_device_gemm(
+            a.astype(np.float32), b.astype(np.float32), c, precision="fp32"
+        )
+        self.assertGreater(rounded_sources["against_float64_reference"]["max_abs_error"], 0.0)
+
     def test_float64_source_uses_true_matmul_not_truncated_promotion(self) -> None:
         rng = np.random.default_rng(7)
         k = 32
